@@ -1,0 +1,16 @@
+# Never commit real secrets
+.env
+*.key
+*.pem
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node
+node_modules/
+
+# Generated reports (if you run the workflows locally)
+reports/

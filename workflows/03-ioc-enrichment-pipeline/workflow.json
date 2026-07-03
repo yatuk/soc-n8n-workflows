@@ -1,0 +1,412 @@
+{
+  "name": "03 - IOC Enrichment Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ioc-enrich",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c3000003-0001-4c03-9003-000000000001",
+      "name": "IOC List Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1200, 100],
+      "webhookId": "c3000003-0001-4c03-9003-00000000ffff"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Classify each submitted IOC by shape. One output item per IOC.\nconst body = $json.body ?? $json;\nconst iocs = (body.iocs ?? []).map(s => String(s).trim()).filter(Boolean);\nif (iocs.length === 0) {\n  throw new Error('No IOCs supplied. POST {\"iocs\": [\"1.2.3.4\", \"evil.com\", \"<sha256>\"]}');\n}\n\nconst ipv4 = /^(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)$/;\nconst hash = /^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$/;\nconst domain = /^(?=.{4,253}$)(([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)\\.)+[a-zA-Z]{2,}$/;\n\nreturn iocs.slice(0, 50).map(ioc => {\n  let type = 'unsupported';\n  if (ipv4.test(ioc)) type = 'ip';\n  else if (hash.test(ioc)) type = 'hash';\n  else if (domain.test(ioc)) type = 'domain';\n  return { json: { ioc, type, batch_id: body.batch_id ?? `ioc-batch-${Date.now()}` } };\n});"
+      },
+      "id": "c3000003-0002-4c03-9003-000000000002",
+      "name": "Classify IOCs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-960, 100]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "type-ip",
+                    "leftValue": "={{ $json.type }}",
+                    "rightValue": "ip",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "IP"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "type-hash",
+                    "leftValue": "={{ $json.type }}",
+                    "rightValue": "hash",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Hash"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "type-domain",
+                    "leftValue": "={{ $json.type }}",
+                    "rightValue": "domain",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Domain"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "c3000003-0003-4c03-9003-000000000003",
+      "name": "Route by IOC Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [-720, 100]
+    },
+    {
+      "parameters": {
+        "url": "=https://www.virustotal.com/api/v3/ip_addresses/{{ $json.ioc }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 10000 }
+      },
+      "id": "c3000003-0004-4c03-9003-000000000004",
+      "name": "VirusTotal: IP Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-480, -180],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "VirusTotal API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.abuseipdb.com/api/v2/check",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "ipAddress", "value": "={{ $('Classify IOCs').item.json.ioc }}" },
+            { "name": "maxAgeInDays", "value": "90" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "c3000003-0005-4c03-9003-000000000005",
+      "name": "AbuseIPDB: Check IP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, -180],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "AbuseIPDB API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.shodan.io/shodan/host/{{ $('Classify IOCs').item.json.ioc }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "key", "value": "SHODAN_API_KEY_PLACEHOLDER" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "c3000003-0006-4c03-9003-000000000006",
+      "name": "Shodan: Host Context (optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, -180],
+      "disabled": true,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Re-attach the original IOC to every intel source. Each source is\n// nullable — an API outage becomes 'lookup_failed', never a dropped IOC.\nconst ioc = $('Classify IOCs').item.json;\nlet vt = null, abuse = null, shodan = null;\ntry { const v = $('VirusTotal: IP Report').item.json; if (v?.data) vt = v; } catch (e) {}\ntry { const a = $('AbuseIPDB: Check IP').item.json; if (a?.data) abuse = a; } catch (e) {}\ntry { const s = $('Shodan: Host Context (optional)').item.json; if (s && !s.error) shodan = s; } catch (e) {}\nreturn { json: { ...ioc, vt, abuseipdb: abuse, shodan } };"
+      },
+      "id": "c3000003-0007-4c03-9003-000000000007",
+      "name": "Combine IP Intel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, -180]
+    },
+    {
+      "parameters": {
+        "url": "=https://www.virustotal.com/api/v3/files/{{ $json.ioc }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 10000 }
+      },
+      "id": "c3000003-0008-4c03-9003-000000000008",
+      "name": "VirusTotal: File Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-480, 20],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "VirusTotal API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ioc = $('Classify IOCs').item.json;\nlet vt = null;\ntry { const v = $json; if (v?.data) vt = v; } catch (e) {}\nreturn { json: { ...ioc, vt, abuseipdb: null, shodan: null } };"
+      },
+      "id": "c3000003-0009-4c03-9003-000000000009",
+      "name": "Tag File Intel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, 20]
+    },
+    {
+      "parameters": {
+        "url": "=https://www.virustotal.com/api/v3/domains/{{ $json.ioc }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 10000 }
+      },
+      "id": "c3000003-0010-4c03-9003-000000000010",
+      "name": "VirusTotal: Domain Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-480, 220],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "VirusTotal API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ioc = $('Classify IOCs').item.json;\nlet vt = null;\ntry { const v = $json; if (v?.data) vt = v; } catch (e) {}\nreturn { json: { ...ioc, vt, abuseipdb: null, shodan: null } };"
+      },
+      "id": "c3000003-0011-4c03-9003-000000000011",
+      "name": "Tag Domain Intel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, 220]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "unsup-1",
+              "name": "vt",
+              "value": "={{ null }}",
+              "type": "object"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "c3000003-0012-4c03-9003-000000000012",
+      "name": "Mark Unsupported",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-480, 420]
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 4
+      },
+      "id": "c3000003-0013-4c03-9003-000000000013",
+      "name": "Merge Intel Streams",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [480, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize all sources into flat rows and compute a 0-100 composite\n// risk score. Weighting: VT detection ratio 70%, AbuseIPDB confidence 30%\n// (VT-only sources are weighted 100% VT). All-sources-failed => lookup_failed.\nconst rows = $input.all().map(({ json: r }) => {\n  if (r.type === 'unsupported') {\n    return { batch_id: r.batch_id, ioc: r.ioc, type: r.type, risk_score: null, risk_level: 'unknown', vt_malicious: null, vt_total_engines: null, abuse_confidence: null, shodan_open_ports: null, notes: 'unsupported IOC format' };\n  }\n  const stats = r.vt?.data?.attributes?.last_analysis_stats ?? null;\n  const total = stats ? Object.values(stats).reduce((a, b) => a + (Number(b) || 0), 0) : 0;\n  const vtScore = stats && total > 0 ? Math.min(1, ((stats.malicious ?? 0) + 0.5 * (stats.suspicious ?? 0)) / Math.max(1, total * 0.25)) : null;\n  const abuseConf = r.abuseipdb?.data?.abuseConfidenceScore ?? null;\n  const ports = r.shodan?.ports ?? null;\n\n  let score = null;\n  if (vtScore !== null && abuseConf !== null) score = Math.round(vtScore * 70 + (abuseConf / 100) * 30);\n  else if (vtScore !== null) score = Math.round(vtScore * 100);\n  else if (abuseConf !== null) score = Math.round(abuseConf);\n\n  const level = score === null ? 'lookup_failed' : score >= 70 ? 'high' : score >= 40 ? 'medium' : score >= 10 ? 'low' : 'clean';\n  return {\n    batch_id: r.batch_id,\n    ioc: r.ioc,\n    type: r.type,\n    risk_score: score,\n    risk_level: level,\n    vt_malicious: stats?.malicious ?? null,\n    vt_total_engines: total || null,\n    abuse_confidence: abuseConf,\n    shodan_open_ports: ports ? ports.join(';') : null,\n    notes: score === null ? 'all intel lookups failed' : '',\n  };\n});\n\n// Highest risk first — the analyst reads top-down.\nrows.sort((a, b) => (b.risk_score ?? -1) - (a.risk_score ?? -1));\nreturn rows.map(r => ({ json: r }));"
+      },
+      "id": "c3000003-0014-4c03-9003-000000000014",
+      "name": "Normalize & Risk Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 100]
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "options": {
+          "fileName": "=ioc-report-{{ $now.toFormat('yyyyLLdd-HHmmss') }}.csv"
+        }
+      },
+      "id": "c3000003-0015-4c03-9003-000000000015",
+      "name": "Convert to CSV Report",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [960, 220]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/data/reports/ioc-report-{{ $now.toFormat('yyyyLLdd-HHmmss') }}.csv",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "id": "c3000003-0016-4c03-9003-000000000016",
+      "name": "Save CSV to Disk",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1200, 220]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ batch_id: $('Normalize & Risk Score').first().json.batch_id, count: $('Normalize & Risk Score').all().length, results: $('Normalize & Risk Score').all().map(i => i.json) }, null, 2) }}",
+        "options": {}
+      },
+      "id": "c3000003-0017-4c03-9003-000000000017",
+      "name": "Respond with JSON Report",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [960, -20]
+    }
+  ],
+  "connections": {
+    "IOC List Webhook": {
+      "main": [
+        [ { "node": "Classify IOCs", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Classify IOCs": {
+      "main": [
+        [ { "node": "Route by IOC Type", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Route by IOC Type": {
+      "main": [
+        [ { "node": "VirusTotal: IP Report", "type": "main", "index": 0 } ],
+        [ { "node": "VirusTotal: File Report", "type": "main", "index": 0 } ],
+        [ { "node": "VirusTotal: Domain Report", "type": "main", "index": 0 } ],
+        [ { "node": "Mark Unsupported", "type": "main", "index": 0 } ]
+      ]
+    },
+    "VirusTotal: IP Report": {
+      "main": [
+        [ { "node": "AbuseIPDB: Check IP", "type": "main", "index": 0 } ]
+      ]
+    },
+    "AbuseIPDB: Check IP": {
+      "main": [
+        [ { "node": "Shodan: Host Context (optional)", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Shodan: Host Context (optional)": {
+      "main": [
+        [ { "node": "Combine IP Intel", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Combine IP Intel": {
+      "main": [
+        [ { "node": "Merge Intel Streams", "type": "main", "index": 0 } ]
+      ]
+    },
+    "VirusTotal: File Report": {
+      "main": [
+        [ { "node": "Tag File Intel", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Tag File Intel": {
+      "main": [
+        [ { "node": "Merge Intel Streams", "type": "main", "index": 1 } ]
+      ]
+    },
+    "VirusTotal: Domain Report": {
+      "main": [
+        [ { "node": "Tag Domain Intel", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Tag Domain Intel": {
+      "main": [
+        [ { "node": "Merge Intel Streams", "type": "main", "index": 2 } ]
+      ]
+    },
+    "Mark Unsupported": {
+      "main": [
+        [ { "node": "Merge Intel Streams", "type": "main", "index": 3 } ]
+      ]
+    },
+    "Merge Intel Streams": {
+      "main": [
+        [ { "node": "Normalize & Risk Score", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Normalize & Risk Score": {
+      "main": [
+        [
+          { "node": "Convert to CSV Report", "type": "main", "index": 0 },
+          { "node": "Respond with JSON Report", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Convert to CSV Report": {
+      "main": [
+        [ { "node": "Save CSV to Disk", "type": "main", "index": 0 } ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": [
+    { "name": "SOC" },
+    { "name": "enrichment" }
+  ]
+}

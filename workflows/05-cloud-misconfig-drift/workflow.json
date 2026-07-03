@@ -1,0 +1,248 @@
+{
+  "name": "05 - Cloud Misconfig Drift Detection",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "e5000005-0001-4e05-9005-000000000001",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1180, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://internal.example.com/api/cloud-inventory/snapshot",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 15000 }
+      },
+      "id": "e5000005-0002-4e05-9005-000000000002",
+      "name": "Fetch Cloud Inventory Snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-940, 0],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "Cloud Inventory API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Use the real inventory response if the API answered; otherwise fall back\n// to an embedded mock snapshot so the workflow is demoable end-to-end.\nconst resp = $input.first().json;\nif (resp && resp.buckets) {\n  return [{ json: { ...resp, source: 'inventory_api' } }];\n}\n\nreturn [{ json: {\n  source: 'embedded_mock',\n  snapshot_at: new Date().toISOString(),\n  account_id: '123456789012',\n  buckets: [\n    { name: 'corp-public-website-assets', region: 'eu-west-1', public_access_block: false, acl_public_read: true, encryption: 'AES256', tags: { approved_public: 'true' } },\n    { name: 'finance-quarterly-exports', region: 'eu-west-1', public_access_block: false, acl_public_read: true, encryption: null, tags: {} },\n    { name: 'app-logs-prod', region: 'eu-central-1', public_access_block: true, acl_public_read: false, encryption: null, tags: {} },\n    { name: 'data-lake-raw', region: 'eu-central-1', public_access_block: true, acl_public_read: false, encryption: 'aws:kms', tags: {} }\n  ],\n  iam_policies: [\n    { name: 'AdminBreakGlass', attached_to: ['role/break-glass'], document: { Statement: [{ Effect: 'Allow', Action: '*', Resource: '*' }] } },\n    { name: 'CiDeployPolicy', attached_to: ['user/ci-deployer'], document: { Statement: [{ Effect: 'Allow', Action: ['s3:*'], Resource: '*' }] } },\n    { name: 'ReadOnlyAnalytics', attached_to: ['group/analysts'], document: { Statement: [{ Effect: 'Allow', Action: ['s3:GetObject'], Resource: 'arn:aws:s3:::data-lake-raw/*' }] } }\n  ],\n  iam_users: [\n    { name: 'ci-deployer', mfa_enabled: false, access_key_age_days: 412, console_access: false },\n    { name: 'j.smith', mfa_enabled: true, access_key_age_days: 45, console_access: true },\n    { name: 'contractor-temp', mfa_enabled: false, access_key_age_days: 12, console_access: true }\n  ],\n  security_groups: [\n    { id: 'sg-0aa11bb22cc33dd44', name: 'bastion-ssh', rules: [{ port: 22, cidr: '203.0.113.0/24' }] },\n    { id: 'sg-0ee55ff66aa77bb88', name: 'legacy-rdp', rules: [{ port: 3389, cidr: '0.0.0.0/0' }] }\n  ]\n} }];"
+      },
+      "id": "e5000005-0003-4e05-9005-000000000003",
+      "name": "Load Inventory (mock fallback)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-700, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Policy-as-code checks. Each violation becomes one finding item.\n// Drift detection: workflowStaticData remembers finding IDs from previous\n// runs, so re-detections are labeled 'existing' and fresh ones 'NEW'.\nconst inv = $input.first().json;\nconst findings = [];\nconst add = (rule, severity, resource, detail, remediation) => findings.push({\n  finding_id: `${rule}:${resource}`,\n  rule, severity, resource, detail, remediation,\n  account_id: inv.account_id ?? 'unknown',\n});\n\nfor (const b of inv.buckets ?? []) {\n  const publicBucket = b.acl_public_read && !b.public_access_block;\n  const approvedPublic = String(b.tags?.approved_public) === 'true';\n  if (publicBucket && !approvedPublic) {\n    add('S3-001-public-bucket', 'critical', `s3://${b.name}`,\n      'Bucket is publicly readable and has no approved_public exception tag.',\n      'Enable Public Access Block or tag with an approved exception after review.');\n  }\n  if (!b.encryption) {\n    add('S3-002-no-encryption', 'medium', `s3://${b.name}`,\n      'Default encryption is disabled.',\n      'Enable SSE-S3 (AES256) or SSE-KMS.');\n  }\n}\n\nfor (const p of inv.iam_policies ?? []) {\n  const stmts = p.document?.Statement ?? [];\n  for (const s of stmts) {\n    const actions = Array.isArray(s.Action) ? s.Action : [s.Action];\n    const wildcardAction = actions.includes('*');\n    const wildcardResource = s.Resource === '*' || (Array.isArray(s.Resource) && s.Resource.includes('*'));\n    if (s.Effect === 'Allow' && wildcardAction && wildcardResource) {\n      add('IAM-001-full-admin', 'critical', `policy/${p.name}`,\n        `Allows Action:* on Resource:* (attached to: ${(p.attached_to ?? []).join(', ')}).`,\n        'Scope to least privilege; if break-glass, require MFA condition + alerting on use.');\n    } else if (s.Effect === 'Allow' && wildcardResource && actions.some(a => String(a).endsWith(':*'))) {\n      add('IAM-002-service-wildcard', 'high', `policy/${p.name}`,\n        `Service-level wildcard (${actions.join(', ')}) on all resources.`,\n        'Constrain Resource to specific ARNs.');\n    }\n  }\n}\n\nfor (const u of inv.iam_users ?? []) {\n  if (u.console_access && !u.mfa_enabled) {\n    add('IAM-003-no-mfa', 'high', `user/${u.name}`,\n      'Console access without MFA.',\n      'Enforce MFA via IAM policy condition or SSO migration.');\n  }\n  if ((u.access_key_age_days ?? 0) > 365) {\n    add('IAM-004-stale-key', 'medium', `user/${u.name}`,\n      `Access key is ${u.access_key_age_days} days old.`,\n      'Rotate the key; prefer short-lived credentials.');\n  }\n}\n\nfor (const sg of inv.security_groups ?? []) {\n  for (const r of sg.rules ?? []) {\n    if (r.cidr === '0.0.0.0/0' && [22, 3389].includes(r.port)) {\n      add('NET-001-mgmt-open-world', 'critical', `${sg.id} (${sg.name})`,\n        `Port ${r.port} open to 0.0.0.0/0.`,\n        'Restrict to VPN/bastion CIDRs or use SSM Session Manager.');\n    }\n  }\n}\n\n// Drift labeling via static data (survives between executions)\nconst sd = $getWorkflowStaticData('global');\nconst known = sd.known_findings ?? {};\nconst nowSeen = {};\nfor (const f of findings) {\n  f.status = known[f.finding_id] ? 'existing' : 'NEW';\n  f.first_seen = known[f.finding_id] ?? new Date().toISOString();\n  nowSeen[f.finding_id] = f.first_seen;\n}\nconst resolved = Object.keys(known).filter(id => !nowSeen[id]);\nsd.known_findings = nowSeen;\n\nif (findings.length === 0) {\n  return [{ json: { no_findings: true, resolved_since_last_run: resolved, inventory_source: inv.source } }];\n}\nreturn findings.map(f => ({ json: { ...f, resolved_since_last_run: resolved, inventory_source: inv.source } }));"
+      },
+      "id": "e5000005-0004-4e05-9005-000000000004",
+      "name": "Evaluate Policy Rules & Drift",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-460, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            {
+              "id": "hasfind-1",
+              "leftValue": "={{ $json.no_findings ?? false }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e5000005-0005-4e05-9005-000000000005",
+      "name": "Any Findings?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-220, 0]
+    },
+    {
+      "parameters": {},
+      "id": "e5000005-0006-4e05-9005-000000000006",
+      "name": "Clean Run - End",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [20, 180]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            {
+              "id": "crit-1",
+              "leftValue": "={{ $json.severity }}",
+              "rightValue": "critical",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "crit-2",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "NEW",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e5000005-0007-4e05-9005-000000000007",
+      "name": "New Critical Finding?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [20, -60]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-alerts",
+          "mode": "name"
+        },
+        "text": "=:cloud: :rotating_light: *NEW critical cloud misconfig* — `{{ $json.rule }}`\n*Resource:* `{{ $json.resource }}` (account {{ $json.account_id }})\n*Detail:* {{ $json.detail }}\n*Remediation:* {{ $json.remediation }}",
+        "otherOptions": {}
+      },
+      "id": "e5000005-0008-4e05-9005-000000000008",
+      "name": "Slack: Immediate Critical Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [260, -160],
+      "credentials": {
+        "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "e5000005-0009-4e05-9005-000000000009",
+      "name": "Queue for Report",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [260, 40]
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2
+      },
+      "id": "e5000005-0010-4e05-9005-000000000010",
+      "name": "Merge All Findings",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [500, -60]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one HTML drift report from all findings, grouped by severity.\nconst items = $input.all().map(i => i.json);\nconst order = { critical: 0, high: 1, medium: 2, low: 3 };\nitems.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));\nconst counts = items.reduce((m, f) => { m[f.severity] = (m[f.severity] ?? 0) + 1; return m; }, {});\nconst newCount = items.filter(f => f.status === 'NEW').length;\nconst resolved = items[0]?.resolved_since_last_run ?? [];\n\nconst sevBadge = s => ({ critical: '#c0392b', high: '#e67e22', medium: '#f1c40f', low: '#95a5a6' }[s] ?? '#95a5a6');\nconst rows = items.map(f => `<tr>\n  <td style=\"padding:6px;border:1px solid #ddd;\"><b style=\"color:${sevBadge(f.severity)}\">${f.severity.toUpperCase()}</b></td>\n  <td style=\"padding:6px;border:1px solid #ddd;\">${f.status === 'NEW' ? '🆕 NEW' : 'existing'}</td>\n  <td style=\"padding:6px;border:1px solid #ddd;\"><code>${f.rule}</code></td>\n  <td style=\"padding:6px;border:1px solid #ddd;\"><code>${f.resource}</code></td>\n  <td style=\"padding:6px;border:1px solid #ddd;\">${f.detail}<br/><i>Fix: ${f.remediation}</i></td>\n</tr>`).join('\\n');\n\nconst html = `<h2>Cloud Misconfiguration Drift Report</h2>\n<p>Generated ${new Date().toISOString()} · source: ${items[0]?.inventory_source ?? 'n/a'}</p>\n<p><b>${items.length}</b> open findings (${newCount} new this run) — critical: ${counts.critical ?? 0}, high: ${counts.high ?? 0}, medium: ${counts.medium ?? 0}. Resolved since last run: ${resolved.length ? resolved.join(', ') : 'none'}.</p>\n<table style=\"border-collapse:collapse;font-family:sans-serif;font-size:13px;\">\n<tr><th>Severity</th><th>Drift</th><th>Rule</th><th>Resource</th><th>Detail</th></tr>\n${rows}\n</table>`;\n\nreturn [{ json: { html, total: items.length, new_count: newCount, counts, subject: `[CloudSec] ${items.length} open misconfigs (${newCount} new, ${counts.critical ?? 0} critical)` } }];"
+      },
+      "id": "e5000005-0011-4e05-9005-000000000011",
+      "name": "Build Drift Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, -60]
+    },
+    {
+      "parameters": {
+        "fromEmail": "soc-reports@example.com",
+        "toEmail": "cloud-security@example.com",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "e5000005-0012-4e05-9005-000000000012",
+      "name": "Email: Drift Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [980, -60],
+      "credentials": {
+        "smtp": { "id": "PLACEHOLDER", "name": "SMTP - PLACEHOLDER" }
+      }
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [ { "node": "Fetch Cloud Inventory Snapshot", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Fetch Cloud Inventory Snapshot": {
+      "main": [
+        [ { "node": "Load Inventory (mock fallback)", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Load Inventory (mock fallback)": {
+      "main": [
+        [ { "node": "Evaluate Policy Rules & Drift", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Evaluate Policy Rules & Drift": {
+      "main": [
+        [ { "node": "Any Findings?", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Any Findings?": {
+      "main": [
+        [ { "node": "New Critical Finding?", "type": "main", "index": 0 } ],
+        [ { "node": "Clean Run - End", "type": "main", "index": 0 } ]
+      ]
+    },
+    "New Critical Finding?": {
+      "main": [
+        [ { "node": "Slack: Immediate Critical Alert", "type": "main", "index": 0 } ],
+        [ { "node": "Queue for Report", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Slack: Immediate Critical Alert": {
+      "main": [
+        [ { "node": "Merge All Findings", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Queue for Report": {
+      "main": [
+        [ { "node": "Merge All Findings", "type": "main", "index": 1 } ]
+      ]
+    },
+    "Merge All Findings": {
+      "main": [
+        [ { "node": "Build Drift Report", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Build Drift Report": {
+      "main": [
+        [ { "node": "Email: Drift Report", "type": "main", "index": 0 } ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": [
+    { "name": "SOC" },
+    { "name": "cloud-security" }
+  ]
+}

@@ -1,0 +1,261 @@
+{
+  "name": "09 - SOC Weekly Report Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [1],
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "c9000009-0001-4c09-9009-000000000001",
+      "name": "Weekly - Monday 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1220, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://internal.example.com/api/soc-metrics/weekly",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "from", "value": "={{ $now.minus({ days: 7 }).toFormat('yyyy-LL-dd') }}" },
+            { "name": "to", "value": "={{ $now.toFormat('yyyy-LL-dd') }}" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "c9000009-0002-4c09-9009-000000000002",
+      "name": "Fetch SOC Metrics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-980, 0],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "SOC Metrics API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Use the metrics API response if available, else an embedded mock week\n// so the report generator is demoable end-to-end.\nconst resp = $input.first().json;\nif (resp && resp.alerts_total !== undefined) {\n  return [{ json: { ...resp, source: 'metrics_api' } }];\n}\n\nreturn [{ json: {\n  source: 'embedded_mock',\n  period: { from: $now.minus({ days: 7 }).toFormat('yyyy-LL-dd'), to: $now.toFormat('yyyy-LL-dd') },\n  alerts_total: 1284,\n  alerts_prev_week: 1102,\n  by_severity: { critical: 14, high: 156, medium: 611, low: 503 },\n  by_category: { phishing: 342, malware: 187, identity: 296, cloud: 121, network: 338 },\n  dispositions: { true_positive: 118, false_positive: 704, benign_true_positive: 391, open: 71 },\n  mttd_minutes_avg: 11,\n  mttr_minutes_avg: 187,\n  mttr_prev_week: 214,\n  incidents_opened: 9,\n  incidents_closed: 7,\n  top_fp_rules: [\n    { rule: 'Impossible Travel (VPN egress)', fp_count: 212 },\n    { rule: 'Mass File Download', fp_count: 96 },\n    { rule: 'Rare Process Execution', fp_count: 74 }\n  ],\n  analyst_load: [\n    { analyst: 'analyst-1', handled: 401 },\n    { analyst: 'analyst-2', handled: 388 },\n    { analyst: 'analyst-3', handled: 424 }\n  ],\n  automation: { auto_triaged: 897, auto_contained_approved: 3, approvals_denied: 1, llm_analyst_agreement_pct: 87 }\n} }];"
+      },
+      "id": "c9000009-0003-4c09-9009-000000000003",
+      "name": "Load Metrics (mock fallback)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-740, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Derive the KPIs both report audiences care about. Pure arithmetic —\n// numbers are computed here, never by the LLM.\nconst m = $input.first().json;\nconst closed = (m.dispositions.true_positive ?? 0) + (m.dispositions.false_positive ?? 0) + (m.dispositions.benign_true_positive ?? 0);\nconst pct = (a, b) => b ? Math.round((a / b) * 1000) / 10 : null;\n\nreturn [{ json: {\n  ...m,\n  kpis: {\n    alert_volume_delta_pct: pct(m.alerts_total - m.alerts_prev_week, m.alerts_prev_week),\n    tp_rate_pct: pct(m.dispositions.true_positive, closed),\n    fp_rate_pct: pct(m.dispositions.false_positive, closed),\n    closure_rate_pct: pct(closed, m.alerts_total),\n    mttr_minutes: m.mttr_minutes_avg,\n    mttr_delta_pct: pct(m.mttr_minutes_avg - m.mttr_prev_week, m.mttr_prev_week),\n    mttd_minutes: m.mttd_minutes_avg,\n    auto_triage_coverage_pct: pct(m.automation?.auto_triaged ?? 0, m.alerts_total),\n    worst_fp_rule: m.top_fp_rules?.[0]?.rule ?? 'n/a',\n    worst_fp_share_pct: pct(m.top_fp_rules?.[0]?.fp_count ?? 0, m.dispositions.false_positive),\n  },\n} }];"
+      },
+      "id": "c9000009-0004-4c09-9009-000000000004",
+      "name": "Compute KPIs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-500, 0]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list",
+          "cachedResultName": "GPT-4O"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You write the executive section of a weekly SOC report for a CISO and leadership. Audience is non-technical but numerate. Use ONLY the numbers provided — never invent, extrapolate, or round differently. Focus on trend, risk, and resourcing implications. No jargon, no acronyms without expansion, no hype.\n\nRespond with ONLY JSON:\n{\n  \"headline\": \"<one sentence: the week in one line>\",\n  \"key_points\": [\"<3-5 bullets, each tying a number to a business implication>\"],\n  \"risk_callouts\": [\"<0-2 things leadership should worry about or fund>\"]\n}",
+              "role": "system"
+            },
+            {
+              "content": "=<metrics>\n{{ JSON.stringify($json, null, 2) }}\n</metrics>"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": { "temperature": 0.2 }
+      },
+      "id": "c9000009-0005-4c09-9009-000000000005",
+      "name": "LLM: Executive Summary",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [-260, -120],
+      "credentials": {
+        "openAiApi": { "id": "PLACEHOLDER", "name": "OpenAI API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list",
+          "cachedResultName": "GPT-4O"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You write the analyst/operations section of a weekly SOC report. Audience: SOC analysts and the detection engineering team. Use ONLY the numbers provided. Be specific and practical — which rules to tune, where time is being lost, what the automation stats imply.\n\nRespond with ONLY JSON:\n{\n  \"notable_patterns\": [\"<2-4 operational observations>\"],\n  \"tuning_recommendations\": [{\"rule\": \"...\", \"recommendation\": \"...\", \"expected_impact\": \"...\"}],\n  \"automation_notes\": \"<1-3 sentences on auto-triage coverage and LLM/analyst agreement>\",\n  \"next_week_focus\": [\"<1-3 concrete items>\"]\n}",
+              "role": "system"
+            },
+            {
+              "content": "=<metrics>\n{{ JSON.stringify($json, null, 2) }}\n</metrics>"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": { "temperature": 0.2 }
+      },
+      "id": "c9000009-0006-4c09-9009-000000000006",
+      "name": "LLM: Analyst Detail",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [-260, 120],
+      "credentials": {
+        "openAiApi": { "id": "PLACEHOLDER", "name": "OpenAI API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "c9000009-0007-4c09-9009-000000000007",
+      "name": "Sync Both Sections",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [-20, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble the full HTML report. All numbers rendered from Compute KPIs\n// directly; LLM sections are prose only.\nconst parse = raw => {\n  let o = raw?.message?.content ?? raw?.output ?? {};\n  if (typeof o === 'string') { try { o = JSON.parse((o.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { o = {}; } }\n  return o;\n};\nconst exec = parse($('LLM: Executive Summary').first().json);\nconst ops = parse($('LLM: Analyst Detail').first().json);\nconst m = $('Compute KPIs').first().json;\nconst k = m.kpis;\nconst arrow = v => v === null ? '' : v > 0 ? `▲ +${v}%` : v < 0 ? `▼ ${v}%` : '→ 0%';\n\nconst html = `<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\nbody{font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222;max-width:860px;margin:auto;padding:24px}\nh1{border-bottom:3px solid #2c3e50}h2{color:#2c3e50;margin-top:28px}\n.kpi{display:inline-block;min-width:150px;margin:6px;padding:12px;border:1px solid #ddd;border-radius:6px;text-align:center}\n.kpi b{font-size:22px;display:block}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px;text-align:left}\n.warn{color:#c0392b}</style></head><body>\n<h1>SOC Weekly Report — ${m.period.from} → ${m.period.to}</h1>\n<p><i>Data source: ${m.source} · generated ${new Date().toISOString()}</i></p>\n\n<h2>Executive Summary</h2>\n<p><b>${exec.headline ?? ''}</b></p>\n<ul>${(exec.key_points ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n${(exec.risk_callouts ?? []).length ? `<p class=\"warn\"><b>Risk callouts:</b></p><ul>${exec.risk_callouts.map(r => `<li class=\"warn\">${r}</li>`).join('')}</ul>` : ''}\n\n<h2>KPIs</h2>\n<div>\n<span class=\"kpi\"><b>${m.alerts_total}</b>alerts (${arrow(k.alert_volume_delta_pct)})</span>\n<span class=\"kpi\"><b>${k.tp_rate_pct}%</b>true-positive rate</span>\n<span class=\"kpi\"><b>${k.fp_rate_pct}%</b>false-positive rate</span>\n<span class=\"kpi\"><b>${k.mttr_minutes}m</b>MTTR (${arrow(k.mttr_delta_pct)})</span>\n<span class=\"kpi\"><b>${k.mttd_minutes}m</b>MTTD</span>\n<span class=\"kpi\"><b>${k.auto_triage_coverage_pct}%</b>auto-triage coverage</span>\n</div>\n\n<h2>Alert Breakdown</h2>\n<table><tr><th>Severity</th>${Object.keys(m.by_severity).map(s => `<th>${s}</th>`).join('')}</tr>\n<tr><td>Count</td>${Object.values(m.by_severity).map(v => `<td>${v}</td>`).join('')}</tr></table>\n<br/>\n<table><tr><th>Category</th>${Object.keys(m.by_category).map(s => `<th>${s}</th>`).join('')}</tr>\n<tr><td>Count</td>${Object.values(m.by_category).map(v => `<td>${v}</td>`).join('')}</tr></table>\n\n<h2>Analyst / Operations Detail</h2>\n<ul>${(ops.notable_patterns ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n<h3>Tuning recommendations</h3>\n<table><tr><th>Rule</th><th>Recommendation</th><th>Expected impact</th></tr>\n${(ops.tuning_recommendations ?? []).map(t => `<tr><td>${t.rule}</td><td>${t.recommendation}</td><td>${t.expected_impact}</td></tr>`).join('')}</table>\n<p>${ops.automation_notes ?? ''}</p>\n<h3>Next week focus</h3>\n<ul>${(ops.next_week_focus ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n\n<h2>Top FP-generating rules</h2>\n<table><tr><th>Rule</th><th>FP count</th></tr>\n${(m.top_fp_rules ?? []).map(r => `<tr><td>${r.rule}</td><td>${r.fp_count}</td></tr>`).join('')}</table>\n</body></html>`;\n\nreturn [{ json: {\n  html,\n  subject: `[SOC] Weekly report ${m.period.from} → ${m.period.to}: ${m.alerts_total} alerts, TP ${k.tp_rate_pct}%, MTTR ${k.mttr_minutes}m`,\n  filename: `soc-weekly-${m.period.to}.html`,\n} }];"
+      },
+      "id": "c9000009-0008-4c09-9009-000000000008",
+      "name": "Build HTML Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "html",
+        "options": {
+          "fileName": "={{ $json.filename }}"
+        }
+      },
+      "id": "c9000009-0009-4c09-9009-000000000009",
+      "name": "Convert to HTML File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [460, 120]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/data/reports/{{ $('Build HTML Report').first().json.filename }}",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "id": "c9000009-0010-4c09-9009-000000000010",
+      "name": "Save Report to Disk",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [700, 120]
+    },
+    {
+      "parameters": {
+        "fromEmail": "soc-reports@example.com",
+        "toEmail": "ciso@example.com, soc-team@example.com",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "c9000009-0011-4c09-9009-000000000011",
+      "name": "Email: Weekly Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [460, -120],
+      "credentials": {
+        "smtp": { "id": "PLACEHOLDER", "name": "SMTP - PLACEHOLDER" }
+      }
+    }
+  ],
+  "connections": {
+    "Weekly - Monday 08:00": {
+      "main": [
+        [ { "node": "Fetch SOC Metrics", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Fetch SOC Metrics": {
+      "main": [
+        [ { "node": "Load Metrics (mock fallback)", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Load Metrics (mock fallback)": {
+      "main": [
+        [ { "node": "Compute KPIs", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Compute KPIs": {
+      "main": [
+        [
+          { "node": "LLM: Executive Summary", "type": "main", "index": 0 },
+          { "node": "LLM: Analyst Detail", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "LLM: Executive Summary": {
+      "main": [
+        [ { "node": "Sync Both Sections", "type": "main", "index": 0 } ]
+      ]
+    },
+    "LLM: Analyst Detail": {
+      "main": [
+        [ { "node": "Sync Both Sections", "type": "main", "index": 1 } ]
+      ]
+    },
+    "Sync Both Sections": {
+      "main": [
+        [ { "node": "Build HTML Report", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Build HTML Report": {
+      "main": [
+        [
+          { "node": "Email: Weekly Report", "type": "main", "index": 0 },
+          { "node": "Convert to HTML File", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Convert to HTML File": {
+      "main": [
+        [ { "node": "Save Report to Disk", "type": "main", "index": 0 } ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": [
+    { "name": "SOC" },
+    { "name": "reporting" }
+  ]
+}

@@ -1,0 +1,216 @@
+{
+  "name": "07 - Credential Leak Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 6,
+              "triggerAtMinute": 30
+            }
+          ]
+        }
+      },
+      "id": "a7000007-0001-4a07-9007-000000000001",
+      "name": "Daily 06:30",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1200, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://haveibeenpwned.com/api/v3/breacheddomain/example.com",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "user-agent", "value": "soc-n8n-credential-leak-monitor" }
+          ]
+        },
+        "options": { "timeout": 20000 }
+      },
+      "id": "a7000007-0002-4a07-9007-000000000002",
+      "name": "HIBP: Domain Breach Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-960, 0],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "HIBP API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// HIBP breacheddomain returns { \"alias\": [\"BreachName\", ...] } — alias@domain.\n// Diff against workflowStaticData so each (account, breach) pair alerts exactly once.\nconst DOMAIN = 'example.com';\nconst resp = $input.first().json;\n\nlet mapping = null;\nif (resp && !resp.error && typeof resp === 'object' && !Array.isArray(resp)) {\n  const entries = Object.entries(resp).filter(([, v]) => Array.isArray(v));\n  if (entries.length) mapping = Object.fromEntries(entries);\n}\n\n// Demo fallback: canned result imitating the HIBP shape (one old breach the\n// static data will already know after the first run, one \"new\" one).\nif (!mapping) {\n  mapping = {\n    'a.yilmaz':   ['LinkedIn2021', 'DataBrokerAggregate2026'],\n    'c.demir':    ['DataBrokerAggregate2026'],\n    'svc-marketing': ['DataBrokerAggregate2026'],\n    'j.smith':    ['LinkedIn2021'],\n  };\n}\n\n// Minimal breach metadata (real flow: GET /api/v3/breach/{name}, no auth needed)\nconst BREACH_META = {\n  LinkedIn2021: { breach_date: '2021-06-22', data_classes: ['Email addresses', 'Phone numbers'], verified: true },\n  DataBrokerAggregate2026: { breach_date: '2026-06-28', data_classes: ['Email addresses', 'Passwords'], verified: true },\n};\n\nconst sd = $getWorkflowStaticData('global');\nconst seen = sd.seen_exposures ?? {};\nconst newExposures = [];\nfor (const [alias, breaches] of Object.entries(mapping)) {\n  for (const breach of breaches) {\n    const key = `${alias}|${breach}`;\n    if (seen[key]) continue;\n    seen[key] = new Date().toISOString();\n    const meta = BREACH_META[breach] ?? {};\n    newExposures.push({\n      email: `${alias}@${DOMAIN}`,\n      alias,\n      breach,\n      breach_date: meta.breach_date ?? null,\n      data_classes: meta.data_classes ?? [],\n      passwords_exposed: (meta.data_classes ?? []).includes('Passwords'),\n    });\n  }\n}\nsd.seen_exposures = seen;\n\nif (newExposures.length === 0) {\n  return [{ json: { new_exposures: false } }];\n}\nreturn [{ json: {\n  new_exposures: true,\n  domain: DOMAIN,\n  count: newExposures.length,\n  breaches: [...new Set(newExposures.map(e => e.breach))],\n  affected_accounts: newExposures,\n  reset_candidates: newExposures.filter(e => e.passwords_exposed),\n} }];"
+      },
+      "id": "a7000007-0003-4a07-9007-000000000003",
+      "name": "Detect New Exposures",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-720, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            {
+              "id": "newexp-1",
+              "leftValue": "={{ $json.new_exposures }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a7000007-0004-4a07-9007-000000000004",
+      "name": "New Exposures?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-480, 0]
+    },
+    {
+      "parameters": {},
+      "id": "a7000007-0005-4a07-9007-000000000005",
+      "name": "Nothing New - End",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [-240, 180]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "reset_candidates",
+        "options": {}
+      },
+      "id": "a7000007-0006-4a07-9007-000000000006",
+      "name": "Split Out Reset Candidates",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-240, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://your-org.okta.example.com/api/v1/users/{{ encodeURIComponent($json.email) }}/lifecycle/expire_password?tempPassword=false",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 15000 }
+      },
+      "id": "a7000007-0007-4a07-9007-000000000007",
+      "name": "Okta: Expire Password (mock)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, -60],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "Okta API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Summarize: which resets were requested, which API calls failed,\n// and which exposures did NOT get a reset (no password in the breach).\nconst detection = $('Detect New Exposures').first().json;\nconst resetResults = $input.all().map((item, i) => {\n  const candidate = detection.reset_candidates[i] ?? {};\n  return {\n    email: candidate.email ?? 'unknown',\n    breach: candidate.breach ?? 'unknown',\n    reset_requested: !item.json.error,\n    error: item.json.error ? String(item.json.error.message ?? item.json.error).slice(0, 200) : null,\n  };\n});\nconst noReset = detection.affected_accounts.filter(a => !a.passwords_exposed);\n\nreturn [{ json: {\n  domain: detection.domain,\n  breaches: detection.breaches,\n  total_new_exposures: detection.count,\n  resets: resetResults,\n  resets_failed: resetResults.filter(r => !r.reset_requested).length,\n  monitored_only: noReset.map(a => `${a.email} (${a.breach}: ${a.data_classes.join(', ') || 'no password data'})`),\n} }];"
+      },
+      "id": "a7000007-0008-4a07-9007-000000000008",
+      "name": "Summarize Response Actions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, -60]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-alerts",
+          "mode": "name"
+        },
+        "text": "=:key: *Credential leak monitor — new exposure(s) for {{ $json.domain }}*\n*Breaches:* {{ $json.breaches.join(', ') }} · *new account exposures:* {{ $json.total_new_exposures }}\n\n*Password resets triggered:*\n{{ $json.resets.map(r => `• ${r.email} (${r.breach}) — ${r.reset_requested ? ':white_check_mark: reset requested' : ':x: FAILED: ' + r.error}`).join('\\n') || '_none required_' }}\n\n*Exposed without password data (monitor only):*\n{{ $json.monitored_only.map(m => `• ${m}`).join('\\n') || '_none_' }}\n{{ $json.resets_failed > 0 ? '\\n:rotating_light: ' + $json.resets_failed + ' reset call(s) failed — handle manually!' : '' }}",
+        "otherOptions": {}
+      },
+      "id": "a7000007-0009-4a07-9007-000000000009",
+      "name": "Slack: Exposure & Reset Summary",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [480, -60],
+      "credentials": {
+        "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "soc-reports@example.com",
+        "toEmail": "iam-team@example.com",
+        "subject": "=[SOC] {{ $json.total_new_exposures }} new credential exposure(s) — {{ $json.breaches.join(', ') }}",
+        "emailFormat": "html",
+        "html": "=<h2>Credential Leak Monitor</h2>\n<p>New exposures for <b>{{ $json.domain }}</b> in: {{ $json.breaches.join(', ') }}</p>\n<h3>Automatic password resets</h3>\n<ul>{{ $json.resets.map(r => `<li>${r.email} — ${r.reset_requested ? 'reset requested' : '<b style=\"color:#c0392b\">FAILED</b>: ' + r.error}</li>`).join('') }}</ul>\n<h3>Monitor-only exposures (no password data)</h3>\n<ul>{{ $json.monitored_only.map(m => `<li>${m}</li>`).join('') || '<li>none</li>' }}</ul>\n<p>Follow-ups: confirm resets completed, check for credential-stuffing attempts against the listed accounts (see workflow 04), notify affected users.</p>",
+        "options": {}
+      },
+      "id": "a7000007-0010-4a07-9007-000000000010",
+      "name": "Email: IAM Team",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [720, -60],
+      "credentials": {
+        "smtp": { "id": "PLACEHOLDER", "name": "SMTP - PLACEHOLDER" }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 06:30": {
+      "main": [
+        [ { "node": "HIBP: Domain Breach Search", "type": "main", "index": 0 } ]
+      ]
+    },
+    "HIBP: Domain Breach Search": {
+      "main": [
+        [ { "node": "Detect New Exposures", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Detect New Exposures": {
+      "main": [
+        [ { "node": "New Exposures?", "type": "main", "index": 0 } ]
+      ]
+    },
+    "New Exposures?": {
+      "main": [
+        [ { "node": "Split Out Reset Candidates", "type": "main", "index": 0 } ],
+        [ { "node": "Nothing New - End", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Split Out Reset Candidates": {
+      "main": [
+        [ { "node": "Okta: Expire Password (mock)", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Okta: Expire Password (mock)": {
+      "main": [
+        [ { "node": "Summarize Response Actions", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Summarize Response Actions": {
+      "main": [
+        [
+          { "node": "Slack: Exposure & Reset Summary", "type": "main", "index": 0 },
+          { "node": "Email: IAM Team", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": [
+    { "name": "SOC" },
+    { "name": "identity" }
+  ]
+}
