@@ -5,6 +5,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "okta-auth-events",
+        "authentication": "headerAuth",
         "options": {}
       },
       "id": "d4000004-0001-4d04-9004-000000000001",
@@ -12,7 +13,10 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [-1420, 60],
-      "webhookId": "d4000004-0001-4d04-9004-00000000ffff"
+      "webhookId": "d4000004-0001-4d04-9004-00000000ffff",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "Webhook Shared Secret - PLACEHOLDER" }
+      }
     },
     {
       "parameters": {
@@ -94,18 +98,20 @@
               "role": "system"
             },
             {
-              "content": "=<detection>\n{{ JSON.stringify($('Detect Brute-Force Pattern').first().json, null, 2) }}\n\nAbuseIPDB context:\n{{ JSON.stringify($json.data ?? { status: 'lookup_failed' }, null, 2) }}\n</detection>"
+              "content": "=<detection>\n{{ JSON.stringify($('Detect Brute-Force Pattern').first().json, null, 2).replaceAll('</detection>', '[/detection]') }}\n\nAbuseIPDB context:\n{{ JSON.stringify($json.data ?? { status: 'lookup_failed' }, null, 2).replaceAll('</detection>', '[/detection]') }}\n</detection>"
             }
           ]
         },
         "jsonOutput": true,
-        "options": { "temperature": 0.1 }
+        "options": { "temperature": 0.1, "maxTokens": 768, "timeout": 60000, "maxRetries": 2 }
       },
       "id": "d4000004-0006-4d04-9004-000000000006",
       "name": "LLM: Attack or False Alarm?",
       "type": "@n8n/n8n-nodes-langchain.openAi",
       "typeVersion": 1.8,
       "position": [-460, -60],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
       "credentials": {
         "openAiApi": { "id": "PLACEHOLDER", "name": "OpenAI API - PLACEHOLDER" }
       }
@@ -113,7 +119,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Validate LLM output; anything malformed becomes 'uncertain' (=> analyst review path).\nconst detection = $('Detect Brute-Force Pattern').first().json;\nlet out = $json.message?.content ?? $json.output ?? {};\nif (typeof out === 'string') {\n  try { out = JSON.parse((out.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { out = {}; }\n}\nconst allowed = ['likely_attack', 'likely_benign', 'uncertain'];\nconst valid = allowed.includes(out.assessment);\nreturn { json: {\n  ...detection,\n  assessment: valid ? out.assessment : 'uncertain',\n  confidence: valid ? Math.min(100, Math.max(0, Number(out.confidence) || 0)) : 0,\n  rationale: valid ? String(out.rationale ?? '') : 'LLM output failed validation.',\n  containment_recommended: valid ? !!out.containment_recommended : false,\n  notes_for_analyst: String(out.notes_for_analyst ?? ''),\n} };"
+        "jsCode": "// Validate LLM output; anything malformed becomes 'uncertain' (=> analyst review path).\nconst detection = $('Detect Brute-Force Pattern').first().json;\nlet out = $json.message?.content ?? $json.output ?? {};\nif (typeof out === 'string') {\n  try { out = JSON.parse((out.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { out = {}; }\n}\nconst allowed = ['likely_attack', 'likely_benign', 'uncertain'];\nconst valid = allowed.includes(out.assessment);\n// Strip Slack-active characters from LLM prose (injection defense).\nconst clean = s => String(s ?? '').replace(/[<>@]/g, '').slice(0, 600);\nreturn { json: {\n  ...detection,\n  assessment: valid ? out.assessment : 'uncertain',\n  confidence: valid ? Math.min(100, Math.max(0, Number(out.confidence) || 0)) : 0,\n  rationale: valid ? clean(out.rationale) : 'LLM output failed validation (or the LLM call failed) — routed to analyst review.',\n  containment_recommended: valid ? !!out.containment_recommended : false,\n  notes_for_analyst: clean(out.notes_for_analyst ?? ''),\n} };"
       },
       "id": "d4000004-0007-4d04-9004-000000000007",
       "name": "Parse Assessment",
@@ -170,6 +176,9 @@
       "name": "Slack: Request Approval",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "position": [260, -180],
       "credentials": {
         "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
@@ -287,6 +296,9 @@
       "name": "Slack: Containment Executed",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "position": [1700, -280],
       "credentials": {
         "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
@@ -307,6 +319,9 @@
       "name": "Slack: Containment Declined",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "position": [1220, -60],
       "credentials": {
         "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
@@ -327,6 +342,9 @@
       "name": "Slack: Analyst Review (low confidence)",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "position": [260, 60],
       "credentials": {
         "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
@@ -405,7 +423,10 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
   },
   "pinData": {},
   "tags": [

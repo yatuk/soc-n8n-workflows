@@ -137,18 +137,20 @@
               "role": "system"
             },
             {
-              "content": "=<items>\n{{ JSON.stringify($json.items.map(i => ({ source: i.source, title: i.title, link: i.link, summary: i.summary, tags: i.tags })), null, 2) }}\n</items>"
+              "content": "=<items>\n{{ JSON.stringify($json.items.map(i => ({ source: i.source, title: i.title, link: i.link, summary: i.summary, tags: i.tags })), null, 2).replaceAll('</items>', '[/items]') }}\n</items>"
             }
           ]
         },
         "jsonOutput": true,
-        "options": { "temperature": 0.2 }
+        "options": { "temperature": 0.2, "maxTokens": 2048, "timeout": 90000, "maxRetries": 2 }
       },
       "id": "b8000008-0009-4b08-9008-000000000009",
       "name": "LLM: Dedup & Summarize Bulletin",
       "type": "@n8n/n8n-nodes-langchain.openAi",
       "typeVersion": 1.8,
       "position": [-40, -60],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
       "credentials": {
         "openAiApi": { "id": "PLACEHOLDER", "name": "OpenAI API - PLACEHOLDER" }
       }
@@ -156,7 +158,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Assemble bulletin: LLM stories + deterministic IOC appendix\n// (IOCs always come from regex/feeds, never from the model).\nconst data = $('Normalize, Dedup & Extract IOCs').first().json;\nlet out = $json.message?.content ?? $json.output ?? {};\nif (typeof out === 'string') {\n  try { out = JSON.parse((out.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { out = {}; }\n}\nconst stories = Array.isArray(out.stories) && out.stories.length\n  ? out.stories\n  : data.items.map(i => ({ headline: i.title, sources: [i.source], links: [i.link], significance: 'advisory', summary: i.summary.slice(0, 300), soc_action: 'review' }));\n\nconst allIocs = { ips: new Set(), domains: new Set(), hashes: new Set(), cves: new Set() };\nfor (const i of data.items) {\n  (i.extracted_iocs?.ips ?? []).forEach(v => allIocs.ips.add(v));\n  (i.extracted_iocs?.domains ?? []).forEach(v => allIocs.domains.add(v));\n  (i.extracted_iocs?.hashes ?? []).forEach(v => allIocs.hashes.add(v));\n  (i.extracted_iocs?.cves ?? []).forEach(v => allIocs.cves.add(v));\n  (i.feed_iocs ?? []).forEach(ind => {\n    if (/ip/i.test(ind.type)) allIocs.ips.add(ind.value);\n    else if (/domain|hostname/i.test(ind.type)) allIocs.domains.add(ind.value);\n    else if (/hash|sha|md5/i.test(ind.type)) allIocs.hashes.add(ind.value);\n  });\n}\nconst defang = s => s.replace(/\\./g, '[.]');\nconst sig = { actively_exploited: ':fire:', poc_available: ':warning:', advisory: ':memo:', research: ':microscope:' };\n\nconst slackText = `:newspaper: *Daily Threat Intel Bulletin* — ${new Date().toISOString().slice(0, 10)}\\n` +\n  `*Top story:* ${out.top_story ?? stories[0]?.headline ?? 'n/a'}\\n\\n` +\n  stories.map(s => `${sig[s.significance] ?? ':memo:'} *${s.headline}* _(${(s.sources ?? []).join(', ')})_\\n${s.summary}\\n*SOC action:* ${s.soc_action ?? 'none'}`).join('\\n\\n') +\n  `\\n\\n:pushpin: *IOC appendix (defanged)*\\n` +\n  `CVEs: ${[...allIocs.cves].join(', ') || 'none'}\\n` +\n  `IPs: ${[...allIocs.ips].map(defang).join(', ') || 'none'}\\n` +\n  `Domains: ${[...allIocs.domains].map(defang).join(', ') || 'none'}\\n` +\n  `Hashes: ${[...allIocs.hashes].map(h => h.slice(0, 16) + '…').join(', ') || 'none'}`;\n\nconst html = `<h2>Daily Threat Intel Bulletin — ${new Date().toISOString().slice(0, 10)}</h2>` +\n  `<p><b>Top story:</b> ${out.top_story ?? ''}</p>` +\n  stories.map(s => `<h3>${s.headline}</h3><p><i>${(s.sources ?? []).join(', ')} — ${s.significance}</i><br/>${s.summary}<br/><b>SOC action:</b> ${s.soc_action ?? 'none'}<br/>${(s.links ?? []).filter(Boolean).map(l => `<a href=\"${l}\">${l}</a>`).join('<br/>')}</p>`).join('') +\n  `<h3>IOC appendix (defanged)</h3><pre>CVEs: ${[...allIocs.cves].join(', ') || 'none'}\\nIPs: ${[...allIocs.ips].map(defang).join(', ') || 'none'}\\nDomains: ${[...allIocs.domains].map(defang).join(', ') || 'none'}\\nSHA/MD5: ${[...allIocs.hashes].join(', ') || 'none'}</pre>`;\n\nreturn { json: { slackText, html, subject: `[TI] Daily bulletin — ${stories.length} stories, ${allIocs.ips.size + allIocs.domains.size + allIocs.hashes.size} IOCs` } };"
+        "jsCode": "// Assemble bulletin: LLM stories + deterministic IOC appendix\n// (IOCs always come from regex/feeds, never from the model).\nconst data = $('Normalize, Dedup & Extract IOCs').first().json;\nlet out = $json.message?.content ?? $json.output ?? {};\nif (typeof out === 'string') {\n  try { out = JSON.parse((out.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { out = {}; }\n}\n// Sanitize LLM prose for Slack/HTML, and only allow http(s) links that were\n// actually present in the source items — the model must not mint URLs.\nconst clean = s => String(s ?? '').replace(/[<>@]/g, '').slice(0, 600);\nconst knownLinks = new Set(data.items.map(i => i.link).filter(Boolean));\nconst stories = (Array.isArray(out.stories) && out.stories.length\n  ? out.stories.map(s => ({\n      headline: clean(s.headline),\n      sources: Array.isArray(s.sources) ? s.sources.map(clean) : [],\n      links: (Array.isArray(s.links) ? s.links : []).filter(l => knownLinks.has(l)),\n      significance: ['actively_exploited', 'poc_available', 'advisory', 'research'].includes(s.significance) ? s.significance : 'advisory',\n      summary: clean(s.summary),\n      soc_action: clean(s.soc_action),\n    }))\n  : data.items.map(i => ({ headline: i.title, sources: [i.source], links: [i.link], significance: 'advisory', summary: i.summary.slice(0, 300), soc_action: 'review' })));\nout.top_story = clean(out.top_story);\n\nconst allIocs = { ips: new Set(), domains: new Set(), hashes: new Set(), cves: new Set() };\nfor (const i of data.items) {\n  (i.extracted_iocs?.ips ?? []).forEach(v => allIocs.ips.add(v));\n  (i.extracted_iocs?.domains ?? []).forEach(v => allIocs.domains.add(v));\n  (i.extracted_iocs?.hashes ?? []).forEach(v => allIocs.hashes.add(v));\n  (i.extracted_iocs?.cves ?? []).forEach(v => allIocs.cves.add(v));\n  (i.feed_iocs ?? []).forEach(ind => {\n    if (/ip/i.test(ind.type)) allIocs.ips.add(ind.value);\n    else if (/domain|hostname/i.test(ind.type)) allIocs.domains.add(ind.value);\n    else if (/hash|sha|md5/i.test(ind.type)) allIocs.hashes.add(ind.value);\n  });\n}\nconst defang = s => s.replace(/\\./g, '[.]');\nconst sig = { actively_exploited: ':fire:', poc_available: ':warning:', advisory: ':memo:', research: ':microscope:' };\n\nconst slackText = `:newspaper: *Daily Threat Intel Bulletin* — ${new Date().toISOString().slice(0, 10)}\\n` +\n  `*Top story:* ${out.top_story ?? stories[0]?.headline ?? 'n/a'}\\n\\n` +\n  stories.map(s => `${sig[s.significance] ?? ':memo:'} *${s.headline}* _(${(s.sources ?? []).join(', ')})_\\n${s.summary}\\n*SOC action:* ${s.soc_action ?? 'none'}`).join('\\n\\n') +\n  `\\n\\n:pushpin: *IOC appendix (defanged)*\\n` +\n  `CVEs: ${[...allIocs.cves].join(', ') || 'none'}\\n` +\n  `IPs: ${[...allIocs.ips].map(defang).join(', ') || 'none'}\\n` +\n  `Domains: ${[...allIocs.domains].map(defang).join(', ') || 'none'}\\n` +\n  `Hashes: ${[...allIocs.hashes].map(h => h.slice(0, 16) + '…').join(', ') || 'none'}`;\n\nconst html = `<h2>Daily Threat Intel Bulletin — ${new Date().toISOString().slice(0, 10)}</h2>` +\n  `<p><b>Top story:</b> ${out.top_story ?? ''}</p>` +\n  stories.map(s => `<h3>${s.headline}</h3><p><i>${(s.sources ?? []).join(', ')} — ${s.significance}</i><br/>${s.summary}<br/><b>SOC action:</b> ${s.soc_action ?? 'none'}<br/>${(s.links ?? []).filter(Boolean).map(l => `<a href=\"${l}\">${l}</a>`).join('<br/>')}</p>`).join('') +\n  `<h3>IOC appendix (defanged)</h3><pre>CVEs: ${[...allIocs.cves].join(', ') || 'none'}\\nIPs: ${[...allIocs.ips].map(defang).join(', ') || 'none'}\\nDomains: ${[...allIocs.domains].map(defang).join(', ') || 'none'}\\nSHA/MD5: ${[...allIocs.hashes].join(', ') || 'none'}</pre>`;\n\nreturn { json: { slackText, html, subject: `[TI] Daily bulletin — ${stories.length} stories, ${allIocs.ips.size + allIocs.domains.size + allIocs.hashes.size} IOCs` } };"
       },
       "id": "b8000008-0010-4b08-9008-000000000010",
       "name": "Format Bulletin + IOC Appendix",
@@ -179,6 +181,9 @@
       "name": "Slack: Daily Bulletin",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "position": [440, -160],
       "credentials": {
         "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
@@ -197,6 +202,8 @@
       "name": "Email: Daily Bulletin",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
       "position": [440, 40],
       "credentials": {
         "smtp": { "id": "PLACEHOLDER", "name": "SMTP - PLACEHOLDER" }
@@ -260,7 +267,10 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
   },
   "pinData": {},
   "tags": [

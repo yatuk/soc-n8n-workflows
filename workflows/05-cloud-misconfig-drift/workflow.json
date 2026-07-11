@@ -129,6 +129,9 @@
       "name": "Slack: Immediate Critical Alert",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "position": [260, -160],
       "credentials": {
         "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
@@ -176,6 +179,8 @@
       "name": "Email: Drift Report",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
       "position": [980, -60],
       "credentials": {
         "smtp": { "id": "PLACEHOLDER", "name": "SMTP - PLACEHOLDER" }
@@ -238,7 +243,10 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
   },
   "pinData": {},
   "tags": [

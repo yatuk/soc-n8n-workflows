@@ -14,13 +14,14 @@ Actionable results open a Jira ticket with the full evidence trail and ping Slac
 
 ## Trigger
 
-`POST /webhook/phishing-report`. An IMAP trigger (`Email Trigger (IMAP)` node watching an abuse mailbox) is the drop-in alternative — see "real environment" below.
+`POST /webhook/phishing-report` (header-auth protected, **responds 202 immediately** — analysis runs async; redeliveries dedup on `report_id`). An IMAP trigger (`Email Trigger (IMAP)` node watching an abuse mailbox) is the drop-in alternative — see "real environment" below.
 
 ## Test it
 
 ```bash
 curl -X POST "http://localhost:5678/webhook/phishing-report" \
   -H "Content-Type: application/json" \
+  -H "X-Webhook-Token: REPLACE_ME" \
   -d '{
     "report_id": "phish-2026-0193",
     "reported_by": "a.yilmaz@example.com",
@@ -37,11 +38,11 @@ curl -X POST "http://localhost:5678/webhook/phishing-report" \
   }'
 ```
 
-Expected response: `{"report_id":"phish-2026-0193","verdict":"phishing","phishing_score":85}` (score varies with VT results and the LLM).
+Expected response (immediate): `{"report_id":"phish-2026-0193","status":"accepted","duplicate":false}` — verdict and ticket land in Slack/Jira once analysis finishes.
 
 ## Node flow
 
-Webhook → Parse Email & Extract IOCs (Code) → Fan Out URL Domains (Code) → VirusTotal Domain Reputation (HTTP, `onError: continue`) → Aggregate VT Enrichment (Code) → LLM Social Engineering Analysis → Compute Phishing Score (Code) → IF actionable → Jira ticket → Slack notify / Slack benign log → Respond.
+Webhook (auth) → Parse Email & Extract IOCs (Code, + `report_id` dedup) → **Respond 202** → IF first delivery → Fan Out URL Domains (Code) → VirusTotal Domain Reputation (HTTP, `onError: continue`) → Aggregate VT Enrichment (Code) → LLM Social Engineering Analysis (`maxTokens`, timeout, retries) → Compute Phishing Score (Code) → IF actionable → urlscan.io detonation (**disabled** optional node) → Jira ticket (retry, failure tolerated & flagged in Slack) → Slack notify / Slack benign log → Audit Log.
 
 ## MITRE ATT&CK
 
@@ -53,6 +54,6 @@ Webhook → Parse Email & Extract IOCs (Code) → Fan Out URL Domains (Code) →
 
 - **Ingest**: swap the webhook for the IMAP trigger on the abuse mailbox, plus a real EML parser (the `Extract from File` node handles `.eml`, or use `mailparser` in a Code node) — this workflow assumes pre-parsed JSON.
 - **VT quota**: the free tier allows 4 lookups/min; the fan-out is capped at 10 domains but you'll want request throttling (Loop Over Items + Wait) on the free tier.
-- **URL detonation**: domain reputation misses freshly registered domains; add urlscan.io submission or a sandbox for the `suspicious` band.
+- **URL detonation**: domain reputation misses freshly registered domains; the disabled `urlscan.io: Detonate URL` node is already wired into the actionable path — create the credential and enable it.
 - **Response actions**: on confirmed `phishing`, extend with mailbox search-and-purge (M365 Graph `security/threatSubmission` or Gmail API) to pull the same message from other inboxes.
 - **Jira fields**: project key `SOC` and issue type ID `10001` are placeholders; map to your project scheme and set a priority field from the verdict.

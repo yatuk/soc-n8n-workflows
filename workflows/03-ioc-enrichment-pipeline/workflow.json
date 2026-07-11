@@ -5,6 +5,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "ioc-enrich",
+        "authentication": "headerAuth",
         "responseMode": "responseNode",
         "options": {}
       },
@@ -13,7 +14,10 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [-1200, 100],
-      "webhookId": "c3000003-0001-4c03-9003-00000000ffff"
+      "webhookId": "c3000003-0001-4c03-9003-00000000ffff",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "Webhook Shared Secret - PLACEHOLDER" }
+      }
     },
     {
       "parameters": {
@@ -402,7 +406,10 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
   },
   "pinData": {},
   "tags": [

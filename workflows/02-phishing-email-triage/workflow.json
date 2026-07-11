@@ -5,6 +5,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "phishing-report",
+        "authentication": "headerAuth",
         "responseMode": "responseNode",
         "options": {}
       },
@@ -12,18 +13,74 @@
       "name": "User-Reported Email Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [-1160, 0],
-      "webhookId": "b2000002-0001-4b02-9002-00000000ffff"
+      "position": [-1400, 0],
+      "webhookId": "b2000002-0001-4b02-9002-00000000ffff",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER",
+          "name": "Webhook Shared Secret - PLACEHOLDER"
+        }
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Parse a reported email (pre-parsed EML as JSON — see README for the shape)\n// and extract the artifacts an analyst would look at first:\n// auth results, sender anomalies, URLs, attachment risk.\nconst body = $json.body ?? $json;\nconst headers = body.headers ?? {};\n\nconst authRaw = String(headers['authentication-results'] ?? '');\nconst auth = {\n  spf: (authRaw.match(/spf=(\\w+)/) || [])[1] ?? 'none',\n  dkim: (authRaw.match(/dkim=(\\w+)/) || [])[1] ?? 'none',\n  dmarc: (authRaw.match(/dmarc=(\\w+)/) || [])[1] ?? 'none',\n};\n\nconst from = String(headers.from ?? '');\nconst replyTo = String(headers['reply-to'] ?? '');\nconst fromDomain = (from.match(/@([\\w.-]+)/) || [])[1]?.toLowerCase() ?? null;\nconst replyToDomain = (replyTo.match(/@([\\w.-]+)/) || [])[1]?.toLowerCase() ?? null;\nconst replyToMismatch = !!(replyToDomain && fromDomain && replyToDomain !== fromDomain);\n\nconst text = `${body.subject ?? ''}\\n${body.body_text ?? ''}\\n${body.body_html ?? ''}`;\nconst urlRe = /https?:\\/\\/[^\\s\"'<>)+]+/gi;\nconst urls = [...new Set((text.match(urlRe) || []).map(u => u.replace(/[.,;]$/, '')))];\nconst urlDomains = [...new Set(urls.map(u => { try { return new URL(u).hostname.toLowerCase(); } catch { return null; } }).filter(Boolean))];\n\nconst riskyExt = ['.exe', '.js', '.vbs', '.scr', '.hta', '.iso', '.img', '.lnk', '.zip', '.rar', '.docm', '.xlsm', '.one'];\nconst attachments = (body.attachments ?? []).map(a => ({\n  filename: a.filename,\n  content_type: a.content_type ?? null,\n  sha256: a.sha256 ?? null,\n  risky: riskyExt.some(ext => String(a.filename ?? '').toLowerCase().endsWith(ext)),\n}));\n\nreturn [{ json: {\n  report_id: body.report_id ?? `phish-${Date.now()}`,\n  reported_by: body.reported_by ?? 'unknown',\n  subject: body.subject ?? '(no subject)',\n  from,\n  from_domain: fromDomain,\n  reply_to: replyTo,\n  reply_to_mismatch: replyToMismatch,\n  auth,\n  auth_failed: [auth.spf, auth.dkim, auth.dmarc].some(v => ['fail', 'softfail', 'permerror'].includes(v)),\n  urls,\n  url_domains: urlDomains,\n  attachments,\n  has_risky_attachment: attachments.some(a => a.risky),\n  body_text: String(body.body_text ?? '').slice(0, 4000),\n} }];"
+        "jsCode": "// Parse a reported email (pre-parsed EML as JSON — see README for the shape)\n// and extract the artifacts an analyst would look at first:\n// auth results, sender anomalies, URLs, attachment risk.\nconst body = $json.body ?? $json;\nconst headers = body.headers ?? {};\n\nconst authRaw = String(headers['authentication-results'] ?? '');\nconst auth = {\n  spf: (authRaw.match(/spf=(\\w+)/) || [])[1] ?? 'none',\n  dkim: (authRaw.match(/dkim=(\\w+)/) || [])[1] ?? 'none',\n  dmarc: (authRaw.match(/dmarc=(\\w+)/) || [])[1] ?? 'none',\n};\n\nconst from = String(headers.from ?? '');\nconst replyTo = String(headers['reply-to'] ?? '');\nconst fromDomain = (from.match(/@([\\w.-]+)/) || [])[1]?.toLowerCase() ?? null;\nconst replyToDomain = (replyTo.match(/@([\\w.-]+)/) || [])[1]?.toLowerCase() ?? null;\nconst replyToMismatch = !!(replyToDomain && fromDomain && replyToDomain !== fromDomain);\n\nconst text = `${body.subject ?? ''}\\n${body.body_text ?? ''}\\n${body.body_html ?? ''}`;\nconst urlRe = /https?:\\/\\/[^\\s\"'<>)+]+/gi;\nconst urls = [...new Set((text.match(urlRe) || []).map(u => u.replace(/[.,;]$/, '')))];\nconst urlDomains = [...new Set(urls.map(u => { try { return new URL(u).hostname.toLowerCase(); } catch { return null; } }).filter(Boolean))];\n\nconst riskyExt = ['.exe', '.js', '.vbs', '.scr', '.hta', '.iso', '.img', '.lnk', '.zip', '.rar', '.docm', '.xlsm', '.one'];\nconst attachments = (body.attachments ?? []).map(a => ({\n  filename: a?.filename ?? 'unknown',\n  content_type: a?.content_type ?? null,\n  sha256: a?.sha256 ?? null,\n  risky: riskyExt.some(ext => String(a?.filename ?? '').toLowerCase().endsWith(ext)),\n}));\n\n// Delimiter escape so email content can't break out of the <email> block\n// in the LLM prompt.\nconst escLlm = v => String(v ?? '').replaceAll('</email>', '[/email]');\n\n// Input validation: an empty report must not become a billable LLM call.\nconst invalid = !body.subject && !body.body_text && !headers.from;\n\n// Deterministic id when the reporter sent none — random fallback ids\n// would never dedup a redelivered payload.\nlet reportId = body.report_id;\nif (!reportId) {\n  const basis = `${headers.from ?? ''}|${body.subject ?? ''}|${body.reported_by ?? ''}`;\n  let h = 0;\n  for (let i = 0; i < basis.length; i++) { h = ((h << 5) - h + basis.charCodeAt(i)) | 0; }\n  reportId = 'phish-h-' + (h >>> 0).toString(16);\n}\n\n// Webhook redelivery dedup (bounded, last 500 report ids)\nconst sd = $getWorkflowStaticData('global');\nconst seen = sd.seen_report_ids ?? [];\nconst duplicate = seen.includes(reportId);\nif (!duplicate) {\n  seen.push(reportId);\n  if (seen.length > 500) seen.splice(0, seen.length - 500);\n}\nsd.seen_report_ids = seen;\n\nreturn [{ json: {\n  report_id: reportId,\n  duplicate,\n  invalid,\n  reported_by: body.reported_by ?? 'unknown',\n  subject: escLlm(body.subject ?? '(no subject)').slice(0, 300),\n  from: escLlm(from).slice(0, 200),\n  from_domain: fromDomain,\n  reply_to: escLlm(replyTo).slice(0, 200),\n  reply_to_mismatch: replyToMismatch,\n  auth,\n  auth_failed: [auth.spf, auth.dkim, auth.dmarc].some(v => ['fail', 'softfail', 'permerror'].includes(v)),\n  urls,\n  url_domains: urlDomains,\n  attachments,\n  has_risky_attachment: attachments.some(a => a.risky),\n  body_text: escLlm(body.body_text ?? '').slice(0, 4000),\n} }];"
       },
       "id": "b2000002-0002-4b02-9002-000000000002",
       "name": "Parse Email & Extract IOCs",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
+      "position": [-1160, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ report_id: $json?.report_id ?? null, status: $json?.invalid ? 'rejected_invalid_payload' : 'accepted', duplicate: $json?.duplicate ?? false }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "b2000002-0013-4b02-9002-000000000013",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
       "position": [-920, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            {
+              "id": "dup-1",
+              "leftValue": "={{ $json.duplicate ?? false }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+            },
+            {
+              "id": "dup-2",
+              "leftValue": "={{ $json.invalid ?? false }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2000002-0014-4b02-9002-000000000014",
+      "name": "First Delivery?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-680, 0]
+    },
+    {
+      "parameters": {},
+      "id": "b2000002-0015-4b02-9002-000000000015",
+      "name": "Duplicate - End",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [-440, 180]
     },
     {
       "parameters": {
@@ -33,7 +90,7 @@
       "name": "Fan Out URL Domains",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-680, 0]
+      "position": [-440, 0]
     },
     {
       "parameters": {
@@ -48,7 +105,7 @@
       "name": "VirusTotal: Domain Reputation",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [-440, 0],
+      "position": [-200, 0],
       "alwaysOutputData": true,
       "onError": "continueRegularOutput",
       "credentials": {
@@ -60,13 +117,13 @@
     },
     {
       "parameters": {
-        "jsCode": "// Collapse per-domain VT verdicts into one enrichment summary.\n// Lookup failures degrade to 'lookup_failed' — they must not drop the report.\nconst results = $input.all().map(item => {\n  const j = item.json;\n  if (j.skip_lookup) return null;\n  const stats = j.data?.attributes?.last_analysis_stats;\n  const domain = j.data?.id ?? $('Fan Out URL Domains').first().json.domain;\n  if (!stats) return { domain, status: 'lookup_failed', malicious: 0, suspicious: 0 };\n  return {\n    domain,\n    status: 'ok',\n    malicious: stats.malicious ?? 0,\n    suspicious: stats.suspicious ?? 0,\n    reputation: j.data?.attributes?.reputation ?? null,\n  };\n}).filter(Boolean);\n\nconst email = $('Parse Email & Extract IOCs').first().json;\nreturn [{ json: {\n  ...email,\n  vt_results: results,\n  vt_max_malicious: Math.max(0, ...results.map(r => r.malicious)),\n  vt_any_failed: results.some(r => r.status === 'lookup_failed'),\n} }];"
+        "jsCode": "// Collapse per-domain VT verdicts into one enrichment summary.\n// Lookup failures degrade to 'lookup_failed' — they must not drop the report.\nconst results = $input.all().map(item => {\n  const j = item.json;\n  if (j.skip_lookup) return null;\n  const stats = j.data?.attributes?.last_analysis_stats;\n  const domain = j.data?.id ?? $('Fan Out URL Domains').first().json?.domain;\n  if (!stats) return { domain, status: 'lookup_failed', malicious: 0, suspicious: 0 };\n  return {\n    domain,\n    status: 'ok',\n    malicious: stats.malicious ?? 0,\n    suspicious: stats.suspicious ?? 0,\n    reputation: j.data?.attributes?.reputation ?? null,\n  };\n}).filter(Boolean);\n\nconst email = $('Parse Email & Extract IOCs').first().json;\nreturn [{ json: {\n  ...email,\n  vt_results: results,\n  vt_max_malicious: Math.max(0, ...results.map(r => r.malicious)),\n  vt_any_failed: results.some(r => r.status === 'lookup_failed'),\n} }];"
       },
       "id": "b2000002-0005-4b02-9002-000000000005",
       "name": "Aggregate VT Enrichment",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-200, 0]
+      "position": [40, 0]
     },
     {
       "parameters": {
@@ -83,20 +140,25 @@
               "role": "system"
             },
             {
-              "content": "=<email>\nFrom: {{ $json.from }}\nReply-To: {{ $json.reply_to }}\nSubject: {{ $json.subject }}\nBody:\n{{ $json.body_text }}\n</email>"
+              "content": "=<email>\nFrom: {{ $json.from ?? 'n/a' }}\nReply-To: {{ $json.reply_to ?? 'n/a' }}\nSubject: {{ $json.subject ?? 'n/a' }}\nBody:\n{{ $json.body_text ?? '' }}\n</email>"
             }
           ]
         },
         "jsonOutput": true,
         "options": {
-          "temperature": 0.1
+          "temperature": 0.1,
+          "maxTokens": 768,
+          "timeout": 60000,
+          "maxRetries": 2
         }
       },
       "id": "b2000002-0006-4b02-9002-000000000006",
       "name": "LLM: Social Engineering Analysis",
       "type": "@n8n/n8n-nodes-langchain.openAi",
       "typeVersion": 1.8,
-      "position": [40, 0],
+      "position": [280, 0],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
       "credentials": {
         "openAiApi": {
           "id": "PLACEHOLDER",
@@ -107,13 +169,13 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Weighted composite score. Deterministic signals dominate;\n// the LLM's language score contributes but cannot alone cross the threshold.\nconst email = $('Aggregate VT Enrichment').item.json;\nlet se = $json.message?.content ?? $json.output ?? {};\nif (typeof se === 'string') {\n  try { se = JSON.parse((se.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch { se = {}; }\n}\nconst seScore = Math.min(100, Math.max(0, Number(se.social_engineering_score) || 0));\n\nlet score = 0;\nconst reasons = [];\nif (email.auth_failed) { score += 25; reasons.push(`Email auth failure (SPF=${email.auth.spf}, DKIM=${email.auth.dkim}, DMARC=${email.auth.dmarc})`); }\nif (email.reply_to_mismatch) { score += 10; reasons.push(`Reply-To domain (${email.reply_to}) differs from From domain`); }\nif (email.vt_max_malicious >= 3) { score += 35; reasons.push(`URL domain flagged malicious by ${email.vt_max_malicious} VT engines`); }\nelse if (email.vt_max_malicious >= 1) { score += 20; reasons.push(`URL domain flagged by ${email.vt_max_malicious} VT engine(s)`); }\nif (email.has_risky_attachment) { score += 15; reasons.push('Risky attachment type present'); }\nscore += Math.round(seScore * 0.25);\nif (seScore >= 50) reasons.push(`Social-engineering language (LLM score ${seScore}): ${(se.indicators || []).join('; ')}`);\n\nconst verdict = score >= 60 ? 'phishing' : score >= 30 ? 'suspicious' : 'likely_benign';\n\nreturn { json: {\n  ...email,\n  se_analysis: { score: seScore, indicators: se.indicators ?? [], impersonated_entity: se.impersonated_entity ?? null, summary: se.summary ?? '' },\n  phishing_score: Math.min(100, score),\n  score_reasons: reasons,\n  verdict,\n} };"
+        "jsCode": "// Weighted composite score. Deterministic signals dominate;\n// the LLM's language score contributes but cannot alone cross the threshold.\nconst email = $('Aggregate VT Enrichment').item.json;\nlet se = $json.message?.content ?? $json.output ?? {};\nif (typeof se === 'string') {\n  try { se = JSON.parse((se.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch { se = {}; }\n}\nconst seScore = Math.min(100, Math.max(0, Number(se.social_engineering_score) || 0));\n\n// Strip Slack/Jira-active characters from LLM prose (injection defense).\nconst clean = s => String(s ?? '').replace(/[<>@]/g, '').slice(0, 400);\n\nlet score = 0;\nconst reasons = [];\nif (email.auth_failed) { score += 25; reasons.push(`Email auth failure (SPF=${email.auth?.spf}, DKIM=${email.auth?.dkim}, DMARC=${email.auth?.dmarc})`); }\nif (email.reply_to_mismatch) { score += 10; reasons.push(`Reply-To domain (${email.reply_to}) differs from From domain`); }\nif (email.vt_max_malicious >= 3) { score += 35; reasons.push(`URL domain flagged malicious by ${email.vt_max_malicious} VT engines`); }\nelse if (email.vt_max_malicious >= 1) { score += 20; reasons.push(`URL domain flagged by ${email.vt_max_malicious} VT engine(s)`); }\nif (email.has_risky_attachment) { score += 15; reasons.push('Risky attachment type present'); }\nscore += Math.round(seScore * 0.25);\nif (seScore >= 50) reasons.push(`Social-engineering language (LLM score ${seScore}): ${(se.indicators || []).join('; ')}`);\n\nconst verdict = score >= 60 ? 'phishing' : score >= 30 ? 'suspicious' : 'likely_benign';\n\nreturn { json: {\n  ...email,\n  se_analysis: { score: seScore, indicators: (Array.isArray(se.indicators) ? se.indicators : []).map(clean), impersonated_entity: se.impersonated_entity ? clean(se.impersonated_entity) : null, summary: clean(se.summary ?? '') },\n  phishing_score: Math.min(100, score),\n  score_reasons: reasons,\n  verdict,\n} };"
       },
       "id": "b2000002-0007-4b02-9002-000000000007",
       "name": "Compute Phishing Score",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [280, 0]
+      "position": [520, 0]
     },
     {
       "parameters": {
@@ -127,7 +189,7 @@
           "conditions": [
             {
               "id": "phish-gate",
-              "leftValue": "={{ $json.phishing_score }}",
+              "leftValue": "={{ $json.phishing_score ?? 0 }}",
               "rightValue": 30,
               "operator": {
                 "type": "number",
@@ -143,7 +205,30 @@
       "name": "Actionable? (score ≥ 30)",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [520, 0]
+      "position": [760, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://urlscan.io/api/v1/scan/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ url: ($json.urls ?? [])[0] ?? '', visibility: 'private', tags: ['n8n-phishing-triage', $json.report_id ?? 'unknown'] }) }}",
+        "options": { "timeout": 15000 }
+      },
+      "id": "b2000002-0016-4b02-9002-000000000016",
+      "name": "urlscan.io: Detonate URL (optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, -120],
+      "disabled": true,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER", "name": "urlscan.io API - PLACEHOLDER" }
+      }
     },
     {
       "parameters": {
@@ -161,9 +246,9 @@
           "mode": "list",
           "cachedResultName": "Task"
         },
-        "summary": "=[{{ $json.verdict.toUpperCase() }}] Reported email: {{ $json.subject }} (score {{ $json.phishing_score }}/100)",
+        "summary": "=[{{ ($json.verdict ?? 'suspicious').toUpperCase() }}] Reported email: {{ $json.subject ?? '(no subject)' }} (score {{ $json.phishing_score ?? 0 }}/100)",
         "additionalFields": {
-          "description": "=Reported by: {{ $json.reported_by }}\nFrom: {{ $json.from }}\nReply-To: {{ $json.reply_to || 'n/a' }}\nAuth: SPF={{ $json.auth.spf }} DKIM={{ $json.auth.dkim }} DMARC={{ $json.auth.dmarc }}\n\nScore: {{ $json.phishing_score }}/100 — verdict: {{ $json.verdict }}\nReasons:\n{{ $json.score_reasons.map(r => '- ' + r).join('\\n') }}\n\nLLM summary: {{ $json.se_analysis.summary }}\nImpersonated entity: {{ $json.se_analysis.impersonated_entity || 'n/a' }}\n\nURLs:\n{{ $json.urls.map(u => '- ' + u).join('\\n') || '(none)' }}\n\nVirusTotal:\n{{ $json.vt_results.map(r => `- ${r.domain}: ${r.status === 'ok' ? r.malicious + ' malicious engines' : 'lookup failed'}`).join('\\n') || '(no lookups)' }}\n\nAttachments:\n{{ $json.attachments.map(a => `- ${a.filename}${a.risky ? ' ⚠ risky type' : ''} (sha256: ${a.sha256 || 'n/a'})`).join('\\n') || '(none)' }}",
+          "description": "=Reported by: {{ $json.reported_by ?? 'unknown' }}\nFrom: {{ $json.from ?? 'n/a' }}\nReply-To: {{ $json.reply_to || 'n/a' }}\nAuth: SPF={{ $json.auth?.spf ?? 'n/a' }} DKIM={{ $json.auth?.dkim ?? 'n/a' }} DMARC={{ $json.auth?.dmarc ?? 'n/a' }}\n\nScore: {{ $json.phishing_score ?? 0 }}/100 — verdict: {{ $json.verdict ?? 'n/a' }}\nReasons:\n{{ ($json.score_reasons ?? []).map(r => '- ' + r).join('\\n') }}\n\nLLM summary: {{ $json.se_analysis?.summary ?? 'n/a' }}\nImpersonated entity: {{ $json.se_analysis?.impersonated_entity || 'n/a' }}\n\nURLs:\n{{ ($json.urls ?? []).map(u => '- ' + u).join('\\n') || '(none)' }}\n\nVirusTotal:\n{{ ($json.vt_results ?? []).map(r => `- ${r?.domain}: ${r?.status === 'ok' ? r?.malicious + ' malicious engines' : 'lookup failed'}`).join('\\n') || '(no lookups)' }}\n\nAttachments:\n{{ ($json.attachments ?? []).map(a => `- ${a?.filename}${a?.risky ? ' ⚠ risky type' : ''} (sha256: ${a?.sha256 || 'n/a'})`).join('\\n') || '(none)' }}",
           "labels": ["phishing", "automated-triage"]
         }
       },
@@ -171,7 +256,10 @@
       "name": "Jira: Open Phishing Ticket",
       "type": "n8n-nodes-base.jira",
       "typeVersion": 1,
-      "position": [760, -120],
+      "position": [1240, -120],
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "jiraSoftwareCloudApi": {
           "id": "PLACEHOLDER",
@@ -187,14 +275,17 @@
           "value": "#soc-alerts",
           "mode": "name"
         },
-        "text": "=:fishing_pole_and_fish: *Phishing triage: {{ $json.verdict.toUpperCase() }}* (score {{ $json.phishing_score }}/100) — ticket {{ $('Jira: Open Phishing Ticket').item.json.key || 'created' }}\n*Subject:* {{ $json.subject }}\n*From:* `{{ $json.from }}` · reported by {{ $json.reported_by }}\n*Why:* {{ $json.score_reasons.slice(0, 3).join(' · ') }}\n{{ $json.se_analysis.impersonated_entity ? '*Impersonating:* ' + $json.se_analysis.impersonated_entity : '' }}",
+        "text": "=:fishing_pole_and_fish: *Phishing triage: {{ ($('Compute Phishing Score').item.json.verdict ?? 'suspicious').toUpperCase() }}* (score {{ $('Compute Phishing Score').item.json.phishing_score ?? 0 }}/100) — ticket {{ $json?.key || 'creation FAILED — open manually!' }}\n*Subject:* {{ $('Compute Phishing Score').item.json.subject ?? 'n/a' }}\n*From:* `{{ $('Compute Phishing Score').item.json.from ?? 'n/a' }}` · reported by {{ $('Compute Phishing Score').item.json.reported_by ?? 'unknown' }}\n*Why:* {{ ($('Compute Phishing Score').item.json.score_reasons ?? []).slice(0, 3).join(' · ') }}\n{{ $('Compute Phishing Score').item.json.se_analysis?.impersonated_entity ? '*Impersonating:* ' + $('Compute Phishing Score').item.json.se_analysis.impersonated_entity : '' }}",
         "otherOptions": {}
       },
       "id": "b2000002-0010-4b02-9002-000000000010",
       "name": "Slack: Notify SOC",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [1000, -120],
+      "position": [1480, -120],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "slackApi": {
           "id": "PLACEHOLDER",
@@ -210,14 +301,17 @@
           "value": "#soc-alerts",
           "mode": "name"
         },
-        "text": "=:email: Reported email scored *{{ $json.phishing_score }}/100* (likely benign) — no ticket opened.\n*Subject:* {{ $json.subject }} · reported by {{ $json.reported_by }}\n_Closed automatically; thank the reporter._",
+        "text": "=:email: Reported email scored *{{ $json.phishing_score ?? 0 }}/100* (likely benign) — no ticket opened.\n*Subject:* {{ $json.subject ?? 'n/a' }} · reported by {{ $json.reported_by ?? 'unknown' }}\n_Closed automatically; thank the reporter._",
         "otherOptions": {}
       },
       "id": "b2000002-0011-4b02-9002-000000000011",
       "name": "Slack: Log Benign Report",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [760, 140],
+      "position": [1000, 140],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "slackApi": {
           "id": "PLACEHOLDER",
@@ -227,158 +321,100 @@
     },
     {
       "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ report_id: $json.report_id ?? $('Compute Phishing Score').first().json.report_id, verdict: $('Compute Phishing Score').first().json.verdict, phishing_score: $('Compute Phishing Score').first().json.phishing_score }) }}",
-        "options": {}
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured audit record (bounded) — production: audit table insert.\nconst src = $('Compute Phishing Score').first().json;\nlet ticket = null;\ntry { ticket = $('Jira: Open Phishing Ticket').item.json?.key ?? null; } catch (e) {}\nconst sd = $getWorkflowStaticData('global');\nconst log = sd.audit_log ?? [];\nlog.push({\n  ts: new Date().toISOString(),\n  workflow: '02-phishing-email-triage',\n  report_id: src.report_id ?? null,\n  verdict: src.verdict ?? null,\n  phishing_score: src.phishing_score ?? null,\n  ticket,\n  delivery_ok: !$json.error,\n  delivery_error: $json.error ? String($json.error.message ?? $json.error).slice(0, 200) : null,\n});\nif (log.length > 300) log.splice(0, log.length - 300);\nsd.audit_log = log;\nreturn { json: $json };"
       },
-      "id": "b2000002-0012-4b02-9002-000000000012",
-      "name": "Respond to Reporter",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.1,
-      "position": [1240, 0]
+      "id": "b2000002-0017-4b02-9002-000000000017",
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1720, 0]
     }
   ],
   "connections": {
     "User-Reported Email Webhook": {
       "main": [
-        [
-          {
-            "node": "Parse Email & Extract IOCs",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Parse Email & Extract IOCs", "type": "main", "index": 0 } ]
       ]
     },
     "Parse Email & Extract IOCs": {
       "main": [
-        [
-          {
-            "node": "Fan Out URL Domains",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Respond 202 Accepted", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Respond 202 Accepted": {
+      "main": [
+        [ { "node": "First Delivery?", "type": "main", "index": 0 } ]
+      ]
+    },
+    "First Delivery?": {
+      "main": [
+        [ { "node": "Fan Out URL Domains", "type": "main", "index": 0 } ],
+        [ { "node": "Duplicate - End", "type": "main", "index": 0 } ]
       ]
     },
     "Fan Out URL Domains": {
       "main": [
-        [
-          {
-            "node": "VirusTotal: Domain Reputation",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "VirusTotal: Domain Reputation", "type": "main", "index": 0 } ]
       ]
     },
     "VirusTotal: Domain Reputation": {
       "main": [
-        [
-          {
-            "node": "Aggregate VT Enrichment",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Aggregate VT Enrichment", "type": "main", "index": 0 } ]
       ]
     },
     "Aggregate VT Enrichment": {
       "main": [
-        [
-          {
-            "node": "LLM: Social Engineering Analysis",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "LLM: Social Engineering Analysis", "type": "main", "index": 0 } ]
       ]
     },
     "LLM: Social Engineering Analysis": {
       "main": [
-        [
-          {
-            "node": "Compute Phishing Score",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Compute Phishing Score", "type": "main", "index": 0 } ]
       ]
     },
     "Compute Phishing Score": {
       "main": [
-        [
-          {
-            "node": "Actionable? (score ≥ 30)",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Actionable? (score ≥ 30)", "type": "main", "index": 0 } ]
       ]
     },
     "Actionable? (score ≥ 30)": {
       "main": [
-        [
-          {
-            "node": "Jira: Open Phishing Ticket",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Slack: Log Benign Report",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "urlscan.io: Detonate URL (optional)", "type": "main", "index": 0 } ],
+        [ { "node": "Slack: Log Benign Report", "type": "main", "index": 0 } ]
+      ]
+    },
+    "urlscan.io: Detonate URL (optional)": {
+      "main": [
+        [ { "node": "Jira: Open Phishing Ticket", "type": "main", "index": 0 } ]
       ]
     },
     "Jira: Open Phishing Ticket": {
       "main": [
-        [
-          {
-            "node": "Slack: Notify SOC",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Slack: Notify SOC", "type": "main", "index": 0 } ]
       ]
     },
     "Slack: Notify SOC": {
       "main": [
-        [
-          {
-            "node": "Respond to Reporter",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Audit Log", "type": "main", "index": 0 } ]
       ]
     },
     "Slack: Log Benign Report": {
       "main": [
-        [
-          {
-            "node": "Respond to Reporter",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Audit Log", "type": "main", "index": 0 } ]
       ]
     }
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
   },
   "pinData": {},
   "tags": [
-    {
-      "name": "SOC"
-    },
-    {
-      "name": "phishing"
-    }
+    { "name": "SOC" },
+    { "name": "phishing" }
   ]
 }

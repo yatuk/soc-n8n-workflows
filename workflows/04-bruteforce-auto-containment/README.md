@@ -19,7 +19,7 @@ The webhook responds immediately (`onReceived`), so the event source is never bl
 
 ## Trigger
 
-`POST /webhook/okta-auth-events` — shape matches Okta System Log entries (an event-hook receiver or a SIEM forwarder would post these).
+`POST /webhook/okta-auth-events` (header-auth protected) — shape matches Okta System Log entries (an event-hook receiver or a SIEM forwarder would post these).
 
 ## Test it
 
@@ -37,7 +37,9 @@ events.append({"eventType": "user.authentication.auth_via_mfa", "outcome": {"res
 print(json.dumps({"events": events}))
 EOF
 curl -X POST "http://localhost:5678/webhook/okta-auth-events" \
-  -H "Content-Type: application/json" --data @/tmp/bf-events.json
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Token: REPLACE_ME" \
+  --data @/tmp/bf-events.json
 ```
 
 This produces 12 failures + 1 success from the same IP → `brute_force`, severity `critical`. Watch `#soc-escalations` for the approval card, click a link (or open the resume URL from the n8n execution view with `?action=approve`), and observe the containment branch.

@@ -81,17 +81,19 @@
               "role": "system"
             },
             {
-              "content": "=<metrics>\n{{ JSON.stringify($json, null, 2) }}\n</metrics>"
+              "content": "=<metrics>\n{{ JSON.stringify($json, null, 2).replaceAll('</metrics>', '[/metrics]') }}\n</metrics>"
             }
           ]
         },
         "jsonOutput": true,
-        "options": { "temperature": 0.2 }
+        "options": { "temperature": 0.2, "maxTokens": 1536, "timeout": 90000, "maxRetries": 2 }
       },
       "id": "c9000009-0005-4c09-9009-000000000005",
       "name": "LLM: Executive Summary",
       "type": "@n8n/n8n-nodes-langchain.openAi",
       "typeVersion": 1.8,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
       "position": [-260, -120],
       "credentials": {
         "openAiApi": { "id": "PLACEHOLDER", "name": "OpenAI API - PLACEHOLDER" }
@@ -112,17 +114,19 @@
               "role": "system"
             },
             {
-              "content": "=<metrics>\n{{ JSON.stringify($json, null, 2) }}\n</metrics>"
+              "content": "=<metrics>\n{{ JSON.stringify($json, null, 2).replaceAll('</metrics>', '[/metrics]') }}\n</metrics>"
             }
           ]
         },
         "jsonOutput": true,
-        "options": { "temperature": 0.2 }
+        "options": { "temperature": 0.2, "maxTokens": 1536, "timeout": 90000, "maxRetries": 2 }
       },
       "id": "c9000009-0006-4c09-9009-000000000006",
       "name": "LLM: Analyst Detail",
       "type": "@n8n/n8n-nodes-langchain.openAi",
       "typeVersion": 1.8,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
       "position": [-260, 120],
       "credentials": {
         "openAiApi": { "id": "PLACEHOLDER", "name": "OpenAI API - PLACEHOLDER" }
@@ -142,7 +146,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Assemble the full HTML report. All numbers rendered from Compute KPIs\n// directly; LLM sections are prose only.\nconst parse = raw => {\n  let o = raw?.message?.content ?? raw?.output ?? {};\n  if (typeof o === 'string') { try { o = JSON.parse((o.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { o = {}; } }\n  return o;\n};\nconst exec = parse($('LLM: Executive Summary').first().json);\nconst ops = parse($('LLM: Analyst Detail').first().json);\nconst m = $('Compute KPIs').first().json;\nconst k = m.kpis;\nconst arrow = v => v === null ? '' : v > 0 ? `▲ +${v}%` : v < 0 ? `▼ ${v}%` : '→ 0%';\n\nconst html = `<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\nbody{font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222;max-width:860px;margin:auto;padding:24px}\nh1{border-bottom:3px solid #2c3e50}h2{color:#2c3e50;margin-top:28px}\n.kpi{display:inline-block;min-width:150px;margin:6px;padding:12px;border:1px solid #ddd;border-radius:6px;text-align:center}\n.kpi b{font-size:22px;display:block}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px;text-align:left}\n.warn{color:#c0392b}</style></head><body>\n<h1>SOC Weekly Report — ${m.period.from} → ${m.period.to}</h1>\n<p><i>Data source: ${m.source} · generated ${new Date().toISOString()}</i></p>\n\n<h2>Executive Summary</h2>\n<p><b>${exec.headline ?? ''}</b></p>\n<ul>${(exec.key_points ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n${(exec.risk_callouts ?? []).length ? `<p class=\"warn\"><b>Risk callouts:</b></p><ul>${exec.risk_callouts.map(r => `<li class=\"warn\">${r}</li>`).join('')}</ul>` : ''}\n\n<h2>KPIs</h2>\n<div>\n<span class=\"kpi\"><b>${m.alerts_total}</b>alerts (${arrow(k.alert_volume_delta_pct)})</span>\n<span class=\"kpi\"><b>${k.tp_rate_pct}%</b>true-positive rate</span>\n<span class=\"kpi\"><b>${k.fp_rate_pct}%</b>false-positive rate</span>\n<span class=\"kpi\"><b>${k.mttr_minutes}m</b>MTTR (${arrow(k.mttr_delta_pct)})</span>\n<span class=\"kpi\"><b>${k.mttd_minutes}m</b>MTTD</span>\n<span class=\"kpi\"><b>${k.auto_triage_coverage_pct}%</b>auto-triage coverage</span>\n</div>\n\n<h2>Alert Breakdown</h2>\n<table><tr><th>Severity</th>${Object.keys(m.by_severity).map(s => `<th>${s}</th>`).join('')}</tr>\n<tr><td>Count</td>${Object.values(m.by_severity).map(v => `<td>${v}</td>`).join('')}</tr></table>\n<br/>\n<table><tr><th>Category</th>${Object.keys(m.by_category).map(s => `<th>${s}</th>`).join('')}</tr>\n<tr><td>Count</td>${Object.values(m.by_category).map(v => `<td>${v}</td>`).join('')}</tr></table>\n\n<h2>Analyst / Operations Detail</h2>\n<ul>${(ops.notable_patterns ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n<h3>Tuning recommendations</h3>\n<table><tr><th>Rule</th><th>Recommendation</th><th>Expected impact</th></tr>\n${(ops.tuning_recommendations ?? []).map(t => `<tr><td>${t.rule}</td><td>${t.recommendation}</td><td>${t.expected_impact}</td></tr>`).join('')}</table>\n<p>${ops.automation_notes ?? ''}</p>\n<h3>Next week focus</h3>\n<ul>${(ops.next_week_focus ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n\n<h2>Top FP-generating rules</h2>\n<table><tr><th>Rule</th><th>FP count</th></tr>\n${(m.top_fp_rules ?? []).map(r => `<tr><td>${r.rule}</td><td>${r.fp_count}</td></tr>`).join('')}</table>\n</body></html>`;\n\nreturn [{ json: {\n  html,\n  subject: `[SOC] Weekly report ${m.period.from} → ${m.period.to}: ${m.alerts_total} alerts, TP ${k.tp_rate_pct}%, MTTR ${k.mttr_minutes}m`,\n  filename: `soc-weekly-${m.period.to}.html`,\n} }];"
+        "jsCode": "// Assemble the full HTML report. All numbers rendered from Compute KPIs\n// directly; LLM sections are prose only.\nconst parse = raw => {\n  let o = raw?.message?.content ?? raw?.output ?? {};\n  if (typeof o === 'string') { try { o = JSON.parse((o.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { o = {}; } }\n  return o;\n};\n// HTML-escape every LLM-produced string before it enters the report —\n// model output must not be able to inject markup into the CISO's email.\nconst deepClean = o => {\n  if (typeof o === 'string') return o.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 800);\n  if (Array.isArray(o)) return o.map(deepClean);\n  if (o && typeof o === 'object') return Object.fromEntries(Object.entries(o).map(([k, v]) => [k, deepClean(v)]));\n  return o;\n};\nconst exec = deepClean(parse($('LLM: Executive Summary').first().json));\nconst ops = deepClean(parse($('LLM: Analyst Detail').first().json));\nconst m = $('Compute KPIs').first().json;\nconst k = m.kpis;\nconst arrow = v => v === null ? '' : v > 0 ? `▲ +${v}%` : v < 0 ? `▼ ${v}%` : '→ 0%';\n\nconst html = `<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\nbody{font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222;max-width:860px;margin:auto;padding:24px}\nh1{border-bottom:3px solid #2c3e50}h2{color:#2c3e50;margin-top:28px}\n.kpi{display:inline-block;min-width:150px;margin:6px;padding:12px;border:1px solid #ddd;border-radius:6px;text-align:center}\n.kpi b{font-size:22px;display:block}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px;text-align:left}\n.warn{color:#c0392b}</style></head><body>\n<h1>SOC Weekly Report — ${m.period.from} → ${m.period.to}</h1>\n<p><i>Data source: ${m.source} · generated ${new Date().toISOString()}</i></p>\n\n<h2>Executive Summary</h2>\n<p><b>${exec.headline ?? ''}</b></p>\n<ul>${(exec.key_points ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n${(exec.risk_callouts ?? []).length ? `<p class=\"warn\"><b>Risk callouts:</b></p><ul>${exec.risk_callouts.map(r => `<li class=\"warn\">${r}</li>`).join('')}</ul>` : ''}\n\n<h2>KPIs</h2>\n<div>\n<span class=\"kpi\"><b>${m.alerts_total}</b>alerts (${arrow(k.alert_volume_delta_pct)})</span>\n<span class=\"kpi\"><b>${k.tp_rate_pct}%</b>true-positive rate</span>\n<span class=\"kpi\"><b>${k.fp_rate_pct}%</b>false-positive rate</span>\n<span class=\"kpi\"><b>${k.mttr_minutes}m</b>MTTR (${arrow(k.mttr_delta_pct)})</span>\n<span class=\"kpi\"><b>${k.mttd_minutes}m</b>MTTD</span>\n<span class=\"kpi\"><b>${k.auto_triage_coverage_pct}%</b>auto-triage coverage</span>\n</div>\n\n<h2>Alert Breakdown</h2>\n<table><tr><th>Severity</th>${Object.keys(m.by_severity).map(s => `<th>${s}</th>`).join('')}</tr>\n<tr><td>Count</td>${Object.values(m.by_severity).map(v => `<td>${v}</td>`).join('')}</tr></table>\n<br/>\n<table><tr><th>Category</th>${Object.keys(m.by_category).map(s => `<th>${s}</th>`).join('')}</tr>\n<tr><td>Count</td>${Object.values(m.by_category).map(v => `<td>${v}</td>`).join('')}</tr></table>\n\n<h2>Analyst / Operations Detail</h2>\n<ul>${(ops.notable_patterns ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n<h3>Tuning recommendations</h3>\n<table><tr><th>Rule</th><th>Recommendation</th><th>Expected impact</th></tr>\n${(ops.tuning_recommendations ?? []).map(t => `<tr><td>${t.rule}</td><td>${t.recommendation}</td><td>${t.expected_impact}</td></tr>`).join('')}</table>\n<p>${ops.automation_notes ?? ''}</p>\n<h3>Next week focus</h3>\n<ul>${(ops.next_week_focus ?? []).map(p => `<li>${p}</li>`).join('')}</ul>\n\n<h2>Top FP-generating rules</h2>\n<table><tr><th>Rule</th><th>FP count</th></tr>\n${(m.top_fp_rules ?? []).map(r => `<tr><td>${r.rule}</td><td>${r.fp_count}</td></tr>`).join('')}</table>\n</body></html>`;\n\nreturn [{ json: {\n  html,\n  subject: `[SOC] Weekly report ${m.period.from} → ${m.period.to}: ${m.alerts_total} alerts, TP ${k.tp_rate_pct}%, MTTR ${k.mttr_minutes}m`,\n  filename: `soc-weekly-${m.period.to}.html`,\n} }];"
       },
       "id": "c9000009-0008-4c09-9009-000000000008",
       "name": "Build HTML Report",
@@ -190,6 +194,8 @@
       "name": "Email: Weekly Report",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
       "position": [460, -120],
       "credentials": {
         "smtp": { "id": "PLACEHOLDER", "name": "SMTP - PLACEHOLDER" }
@@ -251,7 +257,10 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
   },
   "pinData": {},
   "tags": [

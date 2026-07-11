@@ -5,6 +5,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "siem-alert",
+        "authentication": "headerAuth",
         "responseMode": "responseNode",
         "options": {}
       },
@@ -13,17 +14,37 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [-940, 40],
-      "webhookId": "a1000001-0001-4a01-9001-00000000ffff"
+      "webhookId": "a1000001-0001-4a01-9001-00000000ffff",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER",
+          "name": "Webhook Shared Secret - PLACEHOLDER"
+        }
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Accept Splunk (alert-action, `result`-wrapped) or Elastic (ECS / Kibana alert)\n// payloads and emit ONE stable internal schema. Nothing downstream ever\n// touches vendor-specific field names again.\nconst body = $json.body ?? $json;\nconst raw = body.result ?? body; // Splunk alert actions wrap the event in `result`\nconst isEcs = !!(raw['kibana.alert.rule.name'] || raw['kibana.alert.uuid'] || raw.event?.kind);\n\nconst sevMap = { informational: 1, info: 1, low: 2, medium: 3, high: 4, critical: 5 };\nconst fallbackId = `gen-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;\n\nlet alert;\nif (isEcs) {\n  alert = {\n    source: 'elastic',\n    alert_id: raw['kibana.alert.uuid'] ?? raw._id ?? fallbackId,\n    rule_name: raw['kibana.alert.rule.name'] ?? raw.rule?.name ?? 'unknown_rule',\n    severity: String(raw['kibana.alert.severity'] ?? raw.event?.severity_label ?? 'medium').toLowerCase(),\n    timestamp: raw['@timestamp'] ?? new Date().toISOString(),\n    entity: {\n      host: raw.host?.name ?? null,\n      user: raw.user?.name ?? null,\n      src_ip: raw.source?.ip ?? null,\n      dest_ip: raw.destination?.ip ?? null,\n      process: raw.process?.command_line ?? null,\n    },\n    description: raw['kibana.alert.reason'] ?? raw.message ?? '',\n  };\n} else {\n  alert = {\n    source: 'splunk',\n    alert_id: raw.event_id ?? body.sid ?? fallbackId,\n    rule_name: body.search_name ?? raw.search_name ?? 'unknown_rule',\n    severity: String(raw.severity ?? raw.urgency ?? 'medium').toLowerCase(),\n    timestamp: raw._time ?? new Date().toISOString(),\n    entity: {\n      host: raw.dest_host ?? raw.host ?? null,\n      user: raw.user ?? null,\n      src_ip: raw.src_ip ?? raw.src ?? null,\n      dest_ip: raw.dest_ip ?? raw.dest ?? null,\n      process: raw.process ?? null,\n    },\n    description: raw.signature ?? raw.message ?? '',\n  };\n}\n\nalert.severity_num = sevMap[alert.severity] ?? 3;\nalert.raw = raw;\nreturn [{ json: alert }];"
+        "jsCode": "// Accept Splunk (alert-action, `result`-wrapped) or Elastic (ECS / Kibana alert)\n// payloads and emit ONE stable internal schema. Nothing downstream ever\n// touches vendor-specific field names again.\nconst body = $json.body ?? $json;\nconst raw = body.result ?? body; // Splunk alert actions wrap the event in `result`\nconst isEcs = !!(raw['kibana.alert.rule.name'] || raw['kibana.alert.uuid'] || raw.event?.kind);\n\nconst sevMap = { informational: 1, info: 1, low: 2, medium: 3, high: 4, critical: 5 };\nconst fallbackId = `gen-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;\n\nlet alert;\nif (isEcs) {\n  alert = {\n    source: 'elastic',\n    alert_id: raw['kibana.alert.uuid'] ?? raw._id ?? fallbackId,\n    rule_name: raw['kibana.alert.rule.name'] ?? raw.rule?.name ?? 'unknown_rule',\n    severity: String(raw['kibana.alert.severity'] ?? raw.event?.severity_label ?? 'medium').toLowerCase(),\n    timestamp: raw['@timestamp'] ?? new Date().toISOString(),\n    entity: {\n      host: raw.host?.name ?? null,\n      user: raw.user?.name ?? null,\n      src_ip: raw.source?.ip ?? null,\n      dest_ip: raw.destination?.ip ?? null,\n      process: raw.process?.command_line ?? null,\n    },\n    description: raw['kibana.alert.reason'] ?? raw.message ?? '',\n  };\n} else {\n  alert = {\n    source: 'splunk',\n    alert_id: raw.event_id ?? body.sid ?? fallbackId,\n    rule_name: body.search_name ?? raw.search_name ?? 'unknown_rule',\n    severity: String(raw.severity ?? raw.urgency ?? 'medium').toLowerCase(),\n    timestamp: raw._time ?? new Date().toISOString(),\n    entity: {\n      host: raw.dest_host ?? raw.host ?? null,\n      user: raw.user ?? null,\n      src_ip: raw.src_ip ?? raw.src ?? null,\n      dest_ip: raw.dest_ip ?? raw.dest ?? null,\n      process: raw.process ?? null,\n    },\n    description: raw.signature ?? raw.message ?? '',\n  };\n}\n\nalert.severity_num = sevMap[alert.severity] ?? 3;\nalert.raw = raw;\n\n// Input validation: fallback defaults must not turn an empty/garbage POST\n// into a billable LLM call — require at least one identifying field.\nalert.invalid = !raw.event_id && !body.sid && !raw['kibana.alert.uuid'] && !body.search_name && !raw.signature && !raw['kibana.alert.rule.name'] && !raw.message;\n\n// Deterministic dedup key when the source sent no id: random fallback ids\n// would never dedup a redelivered payload — hash the content instead.\nif (String(alert.alert_id).startsWith('gen-')) {\n  const basis = JSON.stringify([alert.rule_name, alert.entity, alert.timestamp]);\n  let h = 0;\n  for (let i = 0; i < basis.length; i++) { h = ((h << 5) - h + basis.charCodeAt(i)) | 0; }\n  alert.alert_id = 'h-' + (h >>> 0).toString(16);\n}\n\n// Minimal sanitized view for the LLM: no raw passthrough, per-field length\n// caps, delimiter escape so data can't break out of the <alert> block.\nconst esc = v => String(v ?? '').replaceAll('</alert>', '[/alert]').slice(0, 500);\nalert.prompt_payload = JSON.stringify({\n  alert_id: alert.alert_id,\n  source: alert.source,\n  rule_name: esc(alert.rule_name),\n  severity: alert.severity,\n  timestamp: alert.timestamp,\n  entity: Object.fromEntries(Object.entries(alert.entity).map(([k, v]) => [k, v === null ? null : esc(v)])),\n  description: esc(alert.description),\n}, null, 2);\n\n// Webhook senders retry on timeout — dedup on alert_id so a redelivered\n// event never produces a second Slack card (bounded to last 500 ids).\nconst sd = $getWorkflowStaticData('global');\nconst seen = sd.seen_alert_ids ?? [];\nalert.duplicate = seen.includes(alert.alert_id);\nif (!alert.duplicate) {\n  seen.push(alert.alert_id);\n  if (seen.length > 500) seen.splice(0, seen.length - 500);\n}\nsd.seen_alert_ids = seen;\n\nreturn [{ json: alert }];"
       },
       "id": "a1000001-0002-4a01-9001-000000000002",
       "name": "Normalize Alert",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [-700, 40]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ alert_id: $json?.alert_id ?? null, status: $json?.invalid ? 'rejected_invalid_payload' : 'accepted', duplicate: $json?.duplicate ?? false }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "a1000001-0011-4a01-9001-000000000011",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [-460, 40]
     },
     {
       "parameters": {
@@ -37,11 +58,31 @@
           "conditions": [
             {
               "id": "sevgate-1",
-              "leftValue": "={{ $json.severity_num }}",
+              "leftValue": "={{ $json.severity_num ?? 3 }}",
               "rightValue": 2,
               "operator": {
                 "type": "number",
                 "operation": "gte"
+              }
+            },
+            {
+              "id": "sevgate-2",
+              "leftValue": "={{ $json.duplicate ?? false }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "sevgate-3",
+              "leftValue": "={{ $json.invalid ?? false }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
               }
             }
           ],
@@ -50,18 +91,18 @@
         "options": {}
       },
       "id": "a1000001-0003-4a01-9001-000000000003",
-      "name": "Severity Gate (drop informational)",
+      "name": "Severity Gate (drop info & duplicates)",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [-460, 40]
+      "position": [-220, 40]
     },
     {
       "parameters": {
         "modelId": {
           "__rl": true,
-          "value": "gpt-4o",
+          "value": "gpt-4o-mini",
           "mode": "list",
-          "cachedResultName": "GPT-4O"
+          "cachedResultName": "GPT-4O-MINI"
         },
         "messages": {
           "values": [
@@ -70,20 +111,25 @@
               "role": "system"
             },
             {
-              "content": "=<alert>\n{{ JSON.stringify($json, null, 2) }}\n</alert>"
+              "content": "=<alert>\n{{ $json.prompt_payload }}\n</alert>"
             }
           ]
         },
         "jsonOutput": true,
         "options": {
-          "temperature": 0.1
+          "temperature": 0.1,
+          "maxTokens": 1024,
+          "timeout": 60000,
+          "maxRetries": 2
         }
       },
       "id": "a1000001-0004-4a01-9001-000000000004",
       "name": "LLM Triage (Tier-2 Analyst)",
       "type": "@n8n/n8n-nodes-langchain.openAi",
       "typeVersion": 1.8,
-      "position": [-220, -60],
+      "position": [20, -60],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
       "credentials": {
         "openAiApi": {
           "id": "PLACEHOLDER",
@@ -94,13 +140,13 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Defensive parse: LLM output is advisory and may be malformed.\n// Anything that fails validation routes to 'needs_review' — never default-allow.\nconst alert = $('Normalize Alert').item.json;\nlet out = $json.message?.content ?? $json.output ?? $json.text ?? $json;\nif (typeof out === 'string') {\n  const m = out.match(/\\{[\\s\\S]*\\}/);\n  try { out = m ? JSON.parse(m[0]) : null; } catch (e) { out = null; }\n}\nconst allowed = ['true_positive', 'false_positive', 'benign_true_positive'];\nconst valid = out && typeof out === 'object' && allowed.includes(out.verdict);\n\nreturn {\n  json: {\n    ...alert,\n    verdict: valid ? out.verdict : 'needs_review',\n    confidence: valid ? Math.min(100, Math.max(0, Number(out.confidence) || 0)) : 0,\n    rationale: valid ? String(out.rationale ?? '') : 'LLM output failed schema validation — routed to analyst review.',\n    mitre_techniques: valid && Array.isArray(out.mitre_techniques) ? out.mitre_techniques : [],\n    recommended_actions: valid && Array.isArray(out.recommended_actions) ? out.recommended_actions : [],\n  },\n};"
+        "jsCode": "// Defensive parse: LLM output is advisory and may be malformed.\n// Anything that fails validation routes to 'needs_review' — never default-allow.\nconst alert = $('Normalize Alert').item.json;\nlet out = $json.message?.content ?? $json.output ?? $json.text ?? $json;\nif (typeof out === 'string') {\n  const m = out.match(/\\{[\\s\\S]*\\}/);\n  try { out = m ? JSON.parse(m[0]) : null; } catch (e) { out = null; }\n}\nconst allowed = ['true_positive', 'false_positive', 'benign_true_positive'];\nconst valid = out && typeof out === 'object' && allowed.includes(out.verdict);\n\n// Strip Slack-active characters from LLM prose so a prompt-injected model\n// can't smuggle channel mentions or links into the alert card.\nconst clean = s => String(s ?? '').replace(/[<>@]/g, '').slice(0, 600);\n\nreturn {\n  json: {\n    ...alert,\n    verdict: valid ? out.verdict : 'needs_review',\n    confidence: valid ? Math.min(100, Math.max(0, Number(out.confidence) || 0)) : 0,\n    rationale: valid ? clean(out.rationale) : 'LLM output failed schema validation (or the LLM call itself failed) — routed to analyst review.',\n    mitre_techniques: valid && Array.isArray(out.mitre_techniques) ? out.mitre_techniques.map(t => ({ id: clean(t?.id).slice(0, 12), name: clean(t?.name) })) : [],\n    recommended_actions: valid && Array.isArray(out.recommended_actions) ? out.recommended_actions.map(clean) : [],\n  },\n};"
       },
       "id": "a1000001-0005-4a01-9001-000000000005",
       "name": "Parse & Validate Verdict",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [20, -60]
+      "position": [260, -60]
     },
     {
       "parameters": {
@@ -117,7 +163,7 @@
                 "conditions": [
                   {
                     "id": "route-tp",
-                    "leftValue": "={{ $json.verdict }}",
+                    "leftValue": "={{ $json.verdict ?? 'needs_review' }}",
                     "rightValue": "true_positive",
                     "operator": {
                       "type": "string",
@@ -141,7 +187,7 @@
                 "conditions": [
                   {
                     "id": "route-fp",
-                    "leftValue": "={{ $json.verdict }}",
+                    "leftValue": "={{ $json.verdict ?? 'needs_review' }}",
                     "rightValue": "false_positive",
                     "operator": {
                       "type": "string",
@@ -150,7 +196,7 @@
                   },
                   {
                     "id": "route-benign",
-                    "leftValue": "={{ $json.verdict }}",
+                    "leftValue": "={{ $json.verdict ?? 'needs_review' }}",
                     "rightValue": "benign_true_positive",
                     "operator": {
                       "type": "string",
@@ -173,7 +219,7 @@
       "name": "Route by Verdict",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
-      "position": [260, -60]
+      "position": [500, -60]
     },
     {
       "parameters": {
@@ -183,14 +229,17 @@
           "value": "#soc-alerts",
           "mode": "name"
         },
-        "text": "=:rotating_light: *{{ $json.rule_name }}* — verdict: *TRUE POSITIVE* ({{ $json.confidence }}% confidence)\n> {{ $json.rationale }}\n*Entity:* host `{{ $json.entity.host || 'n/a' }}` · user `{{ $json.entity.user || 'n/a' }}` · src `{{ $json.entity.src_ip || 'n/a' }}`\n*MITRE ATT&CK:* {{ ($json.mitre_techniques || []).map(t => `${t.id} ${t.name}`).join(', ') || 'n/a' }}\n*Recommended:* {{ ($json.recommended_actions || []).join(' → ') || 'n/a' }}\n*Alert:* `{{ $json.alert_id }}` · source: {{ $json.source }} · severity: {{ $json.severity }}",
+        "text": "=:rotating_light: *{{ $json.rule_name ?? 'unknown_rule' }}* — verdict: *TRUE POSITIVE* ({{ $json.confidence ?? 0 }}% confidence)\n> {{ $json.rationale ?? 'n/a' }}\n*Entity:* host `{{ $json.entity?.host ?? 'n/a' }}` · user `{{ $json.entity?.user ?? 'n/a' }}` · src `{{ $json.entity?.src_ip ?? 'n/a' }}`\n*MITRE ATT&CK:* {{ ($json.mitre_techniques ?? []).map(t => `${t?.id} ${t?.name}`).join(', ') || 'n/a' }}\n*Recommended:* {{ ($json.recommended_actions ?? []).join(' → ') || 'n/a' }}\n*Alert:* `{{ $json.alert_id ?? 'n/a' }}` · source: {{ $json.source ?? 'n/a' }} · severity: {{ $json.severity ?? 'n/a' }}",
         "otherOptions": {}
       },
       "id": "a1000001-0007-4a01-9001-000000000007",
       "name": "Slack: Escalate TP",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [520, -220],
+      "position": [740, -220],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "slackApi": {
           "id": "PLACEHOLDER",
@@ -206,14 +255,17 @@
           "value": "#soc-alerts",
           "mode": "name"
         },
-        "text": "=:white_check_mark: *{{ $json.rule_name }}* — verdict: *{{ $json.verdict === 'false_positive' ? 'FALSE POSITIVE' : 'BENIGN (expected activity)' }}* ({{ $json.confidence }}%)\n> {{ $json.rationale }}\n_Suppression candidate — review tuning for rule `{{ $json.rule_name }}` if this repeats._ Alert `{{ $json.alert_id }}`",
+        "text": "=:white_check_mark: *{{ $json.rule_name ?? 'unknown_rule' }}* — verdict: *{{ $json.verdict === 'false_positive' ? 'FALSE POSITIVE' : 'BENIGN (expected activity)' }}* ({{ $json.confidence ?? 0 }}%)\n> {{ $json.rationale ?? 'n/a' }}\n_Suppression candidate — review tuning for rule `{{ $json.rule_name ?? 'unknown_rule' }}` if this repeats._ Alert `{{ $json.alert_id ?? 'n/a' }}`",
         "otherOptions": {}
       },
       "id": "a1000001-0008-4a01-9001-000000000008",
       "name": "Slack: FP/Benign Digest",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [520, -60],
+      "position": [740, -60],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "slackApi": {
           "id": "PLACEHOLDER",
@@ -229,14 +281,17 @@
           "value": "#soc-escalations",
           "mode": "name"
         },
-        "text": "=:warning: *{{ $json.rule_name }}* — LLM verdict could not be trusted, needs human review.\n> {{ $json.rationale }}\n*Entity:* host `{{ $json.entity.host || 'n/a' }}` · user `{{ $json.entity.user || 'n/a' }}`\n*Alert:* `{{ $json.alert_id }}` · severity: {{ $json.severity }}",
+        "text": "=:warning: *{{ $json.rule_name ?? 'unknown_rule' }}* — LLM verdict could not be trusted, needs human review.\n> {{ $json.rationale ?? 'n/a' }}\n*Entity:* host `{{ $json.entity?.host ?? 'n/a' }}` · user `{{ $json.entity?.user ?? 'n/a' }}`\n*Alert:* `{{ $json.alert_id ?? 'n/a' }}` · severity: {{ $json.severity ?? 'n/a' }}",
         "otherOptions": {}
       },
       "id": "a1000001-0009-4a01-9001-000000000009",
       "name": "Slack: Needs Analyst Review",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [520, 100],
+      "position": [740, 100],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "slackApi": {
           "id": "PLACEHOLDER",
@@ -251,7 +306,7 @@
             {
               "id": "arch-1",
               "name": "verdict",
-              "value": "archived_low_severity",
+              "value": "archived_low_severity_or_duplicate",
               "type": "string"
             },
             {
@@ -263,7 +318,7 @@
             {
               "id": "arch-3",
               "name": "rationale",
-              "value": "Below severity floor (informational) — archived without LLM triage to save tokens.",
+              "value": "Below severity floor (informational) or duplicate delivery — archived without LLM triage to save tokens.",
               "type": "string"
             }
           ]
@@ -272,22 +327,21 @@
         "options": {}
       },
       "id": "a1000001-0010-4a01-9001-000000000010",
-      "name": "Archive: Below Severity Floor",
+      "name": "Archive: Floor or Duplicate",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [-220, 200]
+      "position": [20, 200]
     },
     {
       "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ alert_id: $json.alert_id, verdict: $json.verdict, confidence: $json.confidence, mitre_techniques: $json.mitre_techniques ?? [] }) }}",
-        "options": {}
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured audit record for every side-effect: what was decided, what was\n// sent where, and when. Bounded to the last 300 records in staticData —\n// production would insert into an audit table instead (see README).\nconst sd = $getWorkflowStaticData('global');\nconst log = sd.audit_log ?? [];\nlog.push({\n  ts: new Date().toISOString(),\n  workflow: '01-alert-triage-llm',\n  alert_id: $json.alert_id ?? null,\n  rule_name: $json.rule_name ?? null,\n  verdict: $json.verdict ?? null,\n  confidence: $json.confidence ?? null,\n  delivery_ok: !$json.error,\n  delivery_error: $json.error ? String($json.error.message ?? $json.error).slice(0, 200) : null,\n  notified: $json.error ? null : ($json.verdict === 'needs_review' ? '#soc-escalations' : '#soc-alerts'),\n});\nif (log.length > 300) log.splice(0, log.length - 300);\nsd.audit_log = log;\nreturn { json: $json };"
       },
-      "id": "a1000001-0011-4a01-9001-000000000011",
-      "name": "Respond to SIEM",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.1,
-      "position": [780, 40]
+      "id": "a1000001-0012-4a01-9001-000000000012",
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [980, -60]
     }
   ],
   "connections": {
@@ -306,14 +360,25 @@
       "main": [
         [
           {
-            "node": "Severity Gate (drop informational)",
+            "node": "Respond 202 Accepted",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Severity Gate (drop informational)": {
+    "Respond 202 Accepted": {
+      "main": [
+        [
+          {
+            "node": "Severity Gate (drop info & duplicates)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Severity Gate (drop info & duplicates)": {
       "main": [
         [
           {
@@ -324,7 +389,7 @@
         ],
         [
           {
-            "node": "Archive: Below Severity Floor",
+            "node": "Archive: Floor or Duplicate",
             "type": "main",
             "index": 0
           }
@@ -382,7 +447,7 @@
       "main": [
         [
           {
-            "node": "Respond to SIEM",
+            "node": "Audit Log",
             "type": "main",
             "index": 0
           }
@@ -393,7 +458,7 @@
       "main": [
         [
           {
-            "node": "Respond to SIEM",
+            "node": "Audit Log",
             "type": "main",
             "index": 0
           }
@@ -404,18 +469,18 @@
       "main": [
         [
           {
-            "node": "Respond to SIEM",
+            "node": "Audit Log",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Archive: Below Severity Floor": {
+    "Archive: Floor or Duplicate": {
       "main": [
         [
           {
-            "node": "Respond to SIEM",
+            "node": "Audit Log",
             "type": "main",
             "index": 0
           }
@@ -425,7 +490,10 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
   },
   "pinData": {},
   "tags": [

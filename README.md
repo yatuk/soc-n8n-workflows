@@ -7,7 +7,7 @@
   <p>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT" /></a>
     <img src="https://img.shields.io/badge/n8n-importable_JSON-EA4B71?logo=n8n&logoColor=white&style=flat-square" alt="n8n" />
-    <img src="https://img.shields.io/badge/workflows-10-blue?style=flat-square" alt="10 workflows" />
+    <img src="https://img.shields.io/badge/workflows-12-blue?style=flat-square" alt="12 workflows" />
     <img src="https://img.shields.io/badge/secrets-zero_embedded-orange?style=flat-square" alt="No secrets" />
     <a href="scripts/validate-workflows.js"><img src="https://img.shields.io/badge/validation-passing-brightgreen?style=flat-square" alt="Validation" /></a>
   </p>
@@ -17,7 +17,7 @@
   <table>
     <tr>
       <td align="center"><strong>Detection</strong><br/><code>04 05 06 07 10</code></td>
-      <td align="center"><strong>Enrichment</strong><br/><code>01 02 03 08</code></td>
+      <td align="center"><strong>Enrichment</strong><br/><code>01 02 03 08 11</code></td>
       <td align="center"><strong>Response</strong><br/><code>02 04 07 10</code></td>
       <td align="center"><strong>Reporting</strong><br/><code>03 05 06 08 09</code></td>
     </tr>
@@ -36,7 +36,9 @@
 
 ## What is this?
 
-Ten n8n workflows covering the day-to-day automation surface of a Security Operations Center. Each one imports directly into n8n (**Workflows → Import from File**) and ships with its own README (test `curl`, MITRE ATT&CK mapping, production notes) and a Mermaid diagram.
+Twelve n8n workflows covering the day-to-day automation surface of a Security Operations Center — ten classic SOAR playbooks, an **agentic triage agent** (AI Agent node with a read-only toolset), and a global error handler. Each one imports directly into n8n (**Workflows → Import from File**) and ships with its own README (test `curl`, MITRE ATT&CK mapping, production notes) and a Mermaid diagram.
+
+All webhook playbooks are production-hardened: shared-secret header auth, **respond-202-before-slow-work** (no sender timeouts, no duplicate redeliveries), replay dedup, LLM token caps + timeouts + retries, retry-with-tolerance on notification/ticket nodes, structured audit logging, and a linkable error workflow.
 
 > **What this is:** a portfolio project demonstrating SOC process knowledge and SOAR-style playbook design on n8n.
 > **What this is not:** a drop-in product. Integrations use placeholder credentials and mock endpoints — [ARCHITECTURE.md](ARCHITECTURE.md) lists honestly what a real deployment changes.
@@ -45,6 +47,7 @@ Ten n8n workflows covering the day-to-day automation surface of a Security Opera
 
 | # | Workflow | Detection | Enrichment | Response | Reporting | LLM | Human-in-loop |
 |---|----------|:---:|:---:|:---:|:---:|:---:|:---:|
+| 00 | [Global Error Handler](workflows/00-error-handler/) | | | | ✅ | ✅ | |
 | 01 | [Alert Triage with LLM Verdict](workflows/01-alert-triage-llm/) | | ✅ | | ✅ | ✅ | |
 | 02 | [Phishing Email Triage](workflows/02-phishing-email-triage/) | ✅ | ✅ | ✅ | | ✅ | |
 | 03 | [IOC Enrichment Pipeline](workflows/03-ioc-enrichment-pipeline/) | | ✅ | | ✅ | | |
@@ -55,6 +58,7 @@ Ten n8n workflows covering the day-to-day automation surface of a Security Opera
 | 08 | [Threat Intel Feed Aggregator](workflows/08-threat-intel-aggregator/) | | ✅ | | ✅ | ✅ | |
 | 09 | [SOC Weekly Report Generator](workflows/09-soc-report-generator/) | | | | ✅ | ✅ | |
 | 10 | [Insider Threat / Anomalous Access](workflows/10-insider-threat-detection/) | ✅ | | ✅ | | ✅ | |
+| 11 | [Agentic Triage Agent (ReAct)](workflows/11-agentic-triage-agent/) | | ✅ | | ✅ | 🤖 agent | |
 
 ---
 
@@ -152,8 +156,11 @@ curl -X POST "http://localhost:5678/webhook/siem-alert" \
 | Principle | In practice |
 |---|---|
 | **LLMs advise, humans decide** | No model output triggers containment; workflow 04 shows the approval gate (Wait node + resume URL, timeout = deny) |
+| **Agents investigate, never act** | Workflow 11's agent gets a read-only toolset, a 6-iteration cap, and an auditable tool trail — containment tools are deliberately absent |
 | **Normalize early** | Splunk and Elastic shapes collapse into one internal schema in the first Code node |
-| **Fail visibly** | TI API outages degrade to `lookup_failed` fields, never silently dropped alerts |
+| **Ack fast, work async** | Webhooks respond 202 before any LLM/API work and dedup redeliveries — sender timeouts can't cause double-processing |
+| **Fail visibly** | TI API outages degrade to `lookup_failed`; notification failures retry then continue flagged; workflow failures page `#soc-automation-health` via [00](workflows/00-error-handler/) |
+| **Cost is bounded** | Every LLM call has `maxTokens`, a timeout, and a retry cap; severity/dedup gates run *before* the model |
 | **Facts beat prose** | Numbers and IOCs always come from Code nodes; LLM writes only the words around them |
 | **No secrets in JSON** | Placeholder credential refs + `*.example.com` mock endpoints — enforced by the validator |
 

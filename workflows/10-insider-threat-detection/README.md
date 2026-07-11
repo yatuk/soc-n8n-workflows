@@ -22,13 +22,14 @@ Escalations open a **confidential Jira case** (labeled, with explicit need-to-kn
 
 ## Trigger
 
-`POST /webhook/access-logs` — a DLP tool, CASB, or SIEM saved-search forwarder would post these.
+`POST /webhook/access-logs` (header-auth protected) — a DLP tool, CASB, or SIEM saved-search forwarder would post these. Responds **202 right after scoring** (with the scored-user summary); LLM checks, ticketing, and Slack run async so the forwarder never times out.
 
 ## Test it
 
 ```bash
 curl -X POST "http://localhost:5678/webhook/access-logs" \
   -H "Content-Type: application/json" \
+  -H "X-Webhook-Token: REPLACE_ME" \
   -d '{
     "events": [
       {"user": "a.yilmaz", "timestamp": "2026-07-04T02:15:00Z", "geo_country": "RO", "resource": "customer-pii-export", "action": "download", "bytes_transferred": 734003200},
@@ -43,7 +44,7 @@ Expected: `a.yilmaz` (HR, off-hours + Romania + PII export + bulk = risk ~100) e
 
 ## Node flow
 
-Webhook → Score Access Anomalies (Code: baselines, weights, combination bonus, one item per risky user) → Switch by risk band → high: direct / medium: LLM plausibility → escalate-or-watchlist → Merge escalations → Jira confidential case → Slack escalation. Watchlist and low-risk paths get lighter handling. Webhook response summarizes all scored users.
+Webhook (auth) → Score Access Anomalies (Code: baselines, weights, combination bonus, one item per risky user) → **Respond 202** (summary of scored users) → Switch by risk band → high: direct / medium: LLM plausibility (token-capped, retried) → escalate-or-watchlist → Merge escalations → Jira confidential case (retry; failure flagged in Slack, not fatal) → Slack escalation → Audit Log. Watchlist and low-risk paths get lighter handling.
 
 ## MITRE ATT&CK
 

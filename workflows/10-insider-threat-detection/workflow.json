@@ -5,6 +5,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "access-logs",
+        "authentication": "headerAuth",
         "responseMode": "responseNode",
         "options": {}
       },
@@ -13,17 +14,37 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [-1240, 40],
-      "webhookId": "d1000010-0001-4d10-9010-00000000ffff"
+      "webhookId": "d1000010-0001-4d10-9010-00000000ffff",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER",
+          "name": "Webhook Shared Secret - PLACEHOLDER"
+        }
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Score user access events against per-user baselines. The signal the SOC\n// cares about is the COMBINATION: off-hours + unusual location + sensitive\n// data access together is far more suspicious than any one alone.\nconst body = $json.body ?? $json;\nconst events = Array.isArray(body) ? body : (body.events ?? []);\nif (events.length === 0) return [{ json: { no_events: true } }];\n\n// --- Mock baselines. Real deployment: computed from 30-90 days of history. ---\nconst BASELINES = {\n  'j.smith':    { usual_countries: ['TR'], usual_hours: [7, 19], role: 'Finance Analyst',   sensitive_normal: ['finance-reports'] },\n  'a.yilmaz':   { usual_countries: ['TR'], usual_hours: [8, 18], role: 'HR Specialist',     sensitive_normal: ['hr-payroll-db'] },\n  'c.demir':    { usual_countries: ['TR', 'DE'], usual_hours: [9, 21], role: 'Senior Engineer', sensitive_normal: ['source-code-repo'] },\n  'svc-backup': { usual_countries: ['TR'], usual_hours: [0, 24], role: 'Service Account',   sensitive_normal: ['*'] },\n};\nconst SENSITIVE_RESOURCES = ['hr-payroll-db', 'customer-pii-export', 'source-code-repo', 'finance-reports', 'board-documents'];\nconst BULK_BYTES = 500 * 1024 * 1024; // 500 MB\n\nconst byUser = {};\nfor (const e of events) {\n  const u = e.user ?? 'unknown';\n  (byUser[u] = byUser[u] ?? []).push(e);\n}\n\nconst results = [];\nfor (const [user, evts] of Object.entries(byUser)) {\n  const base = BASELINES[user] ?? { usual_countries: [], usual_hours: [8, 18], role: 'unknown (no baseline)', sensitive_normal: [] };\n  const signals = [];\n  let score = 0;\n\n  const offHours = evts.filter(e => {\n    const h = new Date(e.timestamp ?? Date.now()).getUTCHours();\n    const day = new Date(e.timestamp ?? Date.now()).getUTCDay();\n    return h < base.usual_hours[0] || h >= base.usual_hours[1] || day === 0 || day === 6;\n  });\n  if (offHours.length > 0 && base.role !== 'Service Account') {\n    score += 20;\n    signals.push(`${offHours.length} event(s) outside usual hours ${base.usual_hours[0]}:00-${base.usual_hours[1]}:00`);\n  }\n\n  const newCountries = [...new Set(evts.map(e => e.geo_country).filter(c => c && !base.usual_countries.includes(c)))];\n  if (newCountries.length > 0) {\n    score += 30;\n    signals.push(`access from unusual location(s): ${newCountries.join(', ')} (baseline: ${base.usual_countries.join(', ') || 'none'})`);\n  }\n\n  const sensitiveHits = evts.filter(e => SENSITIVE_RESOURCES.includes(e.resource) && !base.sensitive_normal.includes(e.resource) && !base.sensitive_normal.includes('*'));\n  if (sensitiveHits.length > 0) {\n    score += 35;\n    signals.push(`accessed sensitive resource(s) outside role: ${[...new Set(sensitiveHits.map(e => e.resource))].join(', ')}`);\n  }\n\n  const bytes = evts.reduce((s, e) => s + (Number(e.bytes_transferred) || 0), 0);\n  if (bytes > BULK_BYTES) {\n    score += 15;\n    signals.push(`bulk transfer: ${(bytes / 1024 / 1024).toFixed(0)} MB in window`);\n  }\n\n  // Combination bonus: three independent signal families together\n  const signalFamilies = [offHours.length > 0, newCountries.length > 0, sensitiveHits.length > 0, bytes > BULK_BYTES].filter(Boolean).length;\n  if (signalFamilies >= 3) {\n    score += 10;\n    signals.push('COMBINATION: 3+ independent anomaly families in one window');\n  }\n\n  if (score === 0) continue;\n  results.push({\n    json: {\n      detection_id: `insider-${Date.now()}-${user}`,\n      user,\n      role: base.role,\n      risk_score: Math.min(100, score),\n      signals,\n      signal_families: signalFamilies,\n      event_count: evts.length,\n      sample_events: evts.slice(0, 5),\n      window_from: evts[0]?.timestamp ?? null,\n      window_to: evts[evts.length - 1]?.timestamp ?? null,\n    },\n  });\n}\n\nif (results.length === 0) return [{ json: { no_events: false, no_anomalies: true } }];\nreturn results;"
+        "jsCode": "// Score user access events against per-user baselines. The signal the SOC\n// cares about is the COMBINATION: off-hours + unusual location + sensitive\n// data access together is far more suspicious than any one alone.\nconst body = $json.body ?? $json;\nconst events = Array.isArray(body) ? body : (body.events ?? []);\nif (events.length === 0) return [{ json: { no_events: true } }];\n\n// --- Mock baselines. Real deployment: computed from 30-90 days of history. ---\nconst BASELINES = {\n  'j.smith':    { usual_countries: ['TR'], usual_hours: [7, 19], role: 'Finance Analyst',   sensitive_normal: ['finance-reports'] },\n  'a.yilmaz':   { usual_countries: ['TR'], usual_hours: [8, 18], role: 'HR Specialist',     sensitive_normal: ['hr-payroll-db'] },\n  'c.demir':    { usual_countries: ['TR', 'DE'], usual_hours: [9, 21], role: 'Senior Engineer', sensitive_normal: ['source-code-repo'] },\n  'svc-backup': { usual_countries: ['TR'], usual_hours: [0, 24], role: 'Service Account',   sensitive_normal: ['*'] },\n};\nconst SENSITIVE_RESOURCES = ['hr-payroll-db', 'customer-pii-export', 'source-code-repo', 'finance-reports', 'board-documents'];\nconst BULK_BYTES = 500 * 1024 * 1024; // 500 MB\n\nconst byUser = {};\nfor (const e of events) {\n  const u = e?.user ?? 'unknown';\n  (byUser[u] = byUser[u] ?? []).push(e);\n}\n\nconst results = [];\nfor (const [user, evts] of Object.entries(byUser)) {\n  const base = BASELINES[user] ?? { usual_countries: [], usual_hours: [8, 18], role: 'unknown (no baseline)', sensitive_normal: [] };\n  const signals = [];\n  let score = 0;\n\n  const offHours = evts.filter(e => {\n    const h = new Date(e?.timestamp ?? Date.now()).getUTCHours();\n    const day = new Date(e?.timestamp ?? Date.now()).getUTCDay();\n    return h < base.usual_hours[0] || h >= base.usual_hours[1] || day === 0 || day === 6;\n  });\n  if (offHours.length > 0 && base.role !== 'Service Account') {\n    score += 20;\n    signals.push(`${offHours.length} event(s) outside usual hours ${base.usual_hours[0]}:00-${base.usual_hours[1]}:00`);\n  }\n\n  const newCountries = [...new Set(evts.map(e => e?.geo_country).filter(c => c && !base.usual_countries.includes(c)))];\n  if (newCountries.length > 0) {\n    score += 30;\n    signals.push(`access from unusual location(s): ${newCountries.join(', ')} (baseline: ${base.usual_countries.join(', ') || 'none'})`);\n  }\n\n  const sensitiveHits = evts.filter(e => SENSITIVE_RESOURCES.includes(e?.resource) && !base.sensitive_normal.includes(e?.resource) && !base.sensitive_normal.includes('*'));\n  if (sensitiveHits.length > 0) {\n    score += 35;\n    signals.push(`accessed sensitive resource(s) outside role: ${[...new Set(sensitiveHits.map(e => e.resource))].join(', ')}`);\n  }\n\n  const bytes = evts.reduce((s, e) => s + (Number(e?.bytes_transferred) || 0), 0);\n  if (bytes > BULK_BYTES) {\n    score += 15;\n    signals.push(`bulk transfer: ${(bytes / 1024 / 1024).toFixed(0)} MB in window`);\n  }\n\n  // Combination bonus: three independent signal families together\n  const signalFamilies = [offHours.length > 0, newCountries.length > 0, sensitiveHits.length > 0, bytes > BULK_BYTES].filter(Boolean).length;\n  if (signalFamilies >= 3) {\n    score += 10;\n    signals.push('COMBINATION: 3+ independent anomaly families in one window');\n  }\n\n  if (score === 0) continue;\n  results.push({\n    json: {\n      detection_id: `insider-${Date.now()}-${user}`,\n      user,\n      role: base.role,\n      risk_score: Math.min(100, score),\n      signals,\n      signal_families: signalFamilies,\n      event_count: evts.length,\n      sample_events: evts.slice(0, 5),\n      window_from: evts[0]?.timestamp ?? null,\n      window_to: evts[evts.length - 1]?.timestamp ?? null,\n    },\n  });\n}\n\nif (results.length === 0) return [{ json: { no_events: false, no_anomalies: true } }];\nreturn results;"
       },
       "id": "d1000010-0002-4d10-9010-000000000002",
       "name": "Score Access Anomalies",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [-1000, 40]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', anomalies_scored: $input.all().filter(i => i.json?.user).length, users: $input.all().filter(i => i.json?.user).map(i => ({ user: i.json.user, risk_score: i.json.risk_score })) }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "d1000010-0012-4d10-9010-000000000012",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [-760, 40]
     },
     {
       "parameters": {
@@ -71,7 +92,7 @@
       "name": "Risk Band",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
-      "position": [-760, 40]
+      "position": [-520, 40]
     },
     {
       "parameters": {
@@ -88,18 +109,25 @@
               "role": "system"
             },
             {
-              "content": "=<detection>\n{{ JSON.stringify($json, null, 2) }}\n</detection>"
+              "content": "=<detection>\n{{ JSON.stringify($json, null, 2).replaceAll('</detection>', '[/detection]') }}\n</detection>"
             }
           ]
         },
         "jsonOutput": true,
-        "options": { "temperature": 0.1 }
+        "options": {
+          "temperature": 0.1,
+          "maxTokens": 768,
+          "timeout": 60000,
+          "maxRetries": 2
+        }
       },
       "id": "d1000010-0004-4d10-9010-000000000004",
       "name": "LLM: Plausibility Check (medium band)",
       "type": "@n8n/n8n-nodes-langchain.openAi",
       "typeVersion": 1.8,
-      "position": [-520, 100],
+      "position": [-280, 100],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
       "credentials": {
         "openAiApi": { "id": "PLACEHOLDER", "name": "OpenAI API - PLACEHOLDER" }
       }
@@ -107,13 +135,13 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Malformed LLM output => escalate (conservative default for insider risk).\nconst det = $('Risk Band').item.json;\nlet out = $json.message?.content ?? $json.output ?? {};\nif (typeof out === 'string') {\n  try { out = JSON.parse((out.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { out = {}; }\n}\nconst decision = ['escalate', 'watchlist'].includes(out.decision) ? out.decision : 'escalate';\nreturn { json: {\n  ...det,\n  llm_decision: decision,\n  llm_confidence: Math.min(100, Math.max(0, Number(out.confidence) || 0)),\n  llm_rationale: String(out.rationale ?? 'LLM output failed validation — escalating by default.'),\n  verify_first: Array.isArray(out.benign_explanations_to_verify) ? out.benign_explanations_to_verify : [],\n} };"
+        "jsCode": "// Malformed LLM output => escalate (conservative default for insider risk).\nconst det = $('Risk Band').item.json;\nlet out = $json.message?.content ?? $json.output ?? {};\nif (typeof out === 'string') {\n  try { out = JSON.parse((out.match(/\\{[\\s\\S]*\\}/) || ['{}'])[0]); } catch (e) { out = {}; }\n}\nconst decision = ['escalate', 'watchlist'].includes(out.decision) ? out.decision : 'escalate';\n// Strip Slack-active characters from LLM prose (injection defense).\nconst clean = s => String(s ?? '').replace(/[<>@]/g, '').slice(0, 600);\nreturn { json: {\n  ...det,\n  llm_decision: decision,\n  llm_confidence: Math.min(100, Math.max(0, Number(out.confidence) || 0)),\n  llm_rationale: clean(out.rationale ?? 'LLM output failed validation (or the call failed) — escalating by default.'),\n  verify_first: Array.isArray(out.benign_explanations_to_verify) ? out.benign_explanations_to_verify.map(clean) : [],\n} };"
       },
       "id": "d1000010-0005-4d10-9010-000000000005",
       "name": "Parse Plausibility Verdict",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-280, 100]
+      "position": [-40, 100]
     },
     {
       "parameters": {
@@ -122,7 +150,7 @@
           "conditions": [
             {
               "id": "esc-1",
-              "leftValue": "={{ $json.llm_decision }}",
+              "leftValue": "={{ $json.llm_decision ?? 'escalate' }}",
               "rightValue": "escalate",
               "operator": { "type": "string", "operation": "equals" }
             }
@@ -135,7 +163,7 @@
       "name": "LLM Says Escalate?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [-40, 100]
+      "position": [200, 100]
     },
     {
       "parameters": {
@@ -146,7 +174,7 @@
       "name": "Merge Escalations",
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3,
-      "position": [200, -40]
+      "position": [440, -40]
     },
     {
       "parameters": {
@@ -164,9 +192,9 @@
           "mode": "list",
           "cachedResultName": "Task"
         },
-        "summary": "=[INSIDER-RISK] {{ $json.user }} ({{ $json.role }}) — risk {{ $json.risk_score }}/100",
+        "summary": "=[INSIDER-RISK] {{ $json.user ?? 'unknown' }} ({{ $json.role ?? 'unknown' }}) — risk {{ $json.risk_score ?? 0 }}/100",
         "additionalFields": {
-          "description": "=Detection: {{ $json.detection_id }}\nUser: {{ $json.user }} ({{ $json.role }})\nRisk score: {{ $json.risk_score }}/100 · signal families: {{ $json.signal_families }}\nWindow: {{ $json.window_from }} → {{ $json.window_to }} ({{ $json.event_count }} events)\n\nSignals:\n{{ $json.signals.map(s => '- ' + s).join('\\n') }}\n\n{{ $json.llm_rationale ? 'LLM plausibility check: ' + $json.llm_rationale : 'Escalated directly (high band) without LLM gate.' }}\n\nVerify before any HR/legal step:\n{{ ($json.verify_first ?? ['Confirm with manager whether activity was sanctioned', 'Check for approved change/release windows', 'Review VPN/travel records']).map(v => '- ' + v).join('\\n') }}\n\nHANDLING: insider cases are confidential — restrict this ticket to the insider-risk group.",
+          "description": "=Detection: {{ $json.detection_id ?? 'n/a' }}\nUser: {{ $json.user ?? 'unknown' }} ({{ $json.role ?? 'unknown' }})\nRisk score: {{ $json.risk_score ?? 0 }}/100 · signal families: {{ $json.signal_families ?? 0 }}\nWindow: {{ $json.window_from ?? '?' }} → {{ $json.window_to ?? '?' }} ({{ $json.event_count ?? 0 }} events)\n\nSignals:\n{{ ($json.signals ?? []).map(s => '- ' + s).join('\\n') }}\n\n{{ $json.llm_rationale ? 'LLM plausibility check: ' + $json.llm_rationale : 'Escalated directly (high band) without LLM gate.' }}\n\nVerify before any HR/legal step:\n{{ ($json.verify_first ?? ['Confirm with manager whether activity was sanctioned', 'Check for approved change/release windows', 'Review VPN/travel records']).map(v => '- ' + v).join('\\n') }}\n\nHANDLING: insider cases are confidential — restrict this ticket to the insider-risk group.",
           "labels": ["insider-risk", "automated-detection", "confidential"]
         }
       },
@@ -174,7 +202,10 @@
       "name": "Jira: Confidential Insider-Risk Case",
       "type": "n8n-nodes-base.jira",
       "typeVersion": 1,
-      "position": [440, -40],
+      "position": [680, -40],
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "jiraSoftwareCloudApi": { "id": "PLACEHOLDER", "name": "Jira Cloud API - PLACEHOLDER" }
       }
@@ -187,14 +218,17 @@
           "value": "#soc-escalations",
           "mode": "name"
         },
-        "text": "=:detective: *Insider-risk escalation* — `{{ $('Merge Escalations').item.json.user }}` ({{ $('Merge Escalations').item.json.role }}) — risk *{{ $('Merge Escalations').item.json.risk_score }}/100*\n{{ $('Merge Escalations').item.json.signals.map(s => '• ' + s).join('\\n') }}\nCase: {{ $json.key || 'ticket created' }} — *handle per insider-risk SOP (need-to-know only, no direct user contact).*",
+        "text": "=:detective: *Insider-risk escalation* — `{{ $('Merge Escalations').item.json.user ?? 'unknown' }}` ({{ $('Merge Escalations').item.json.role ?? 'unknown' }}) — risk *{{ $('Merge Escalations').item.json.risk_score ?? 0 }}/100*\n{{ ($('Merge Escalations').item.json.signals ?? []).map(s => '• ' + s).join('\\n') }}\nCase: {{ $json?.key || 'ticket creation FAILED — open manually!' }} — *handle per insider-risk SOP (need-to-know only, no direct user contact).*",
         "otherOptions": {}
       },
       "id": "d1000010-0009-4d10-9010-000000000009",
       "name": "Slack: Escalate to Security Team",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [680, -40],
+      "position": [920, -40],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
       }
@@ -207,14 +241,17 @@
           "value": "#soc-alerts",
           "mode": "name"
         },
-        "text": "=:eyes: *Insider-risk watchlist* — `{{ $json.user }}` ({{ $json.role }}), risk {{ $json.risk_score }}/100 — LLM assessed plausible-benign ({{ $json.llm_confidence }}%).\n> {{ $json.llm_rationale }}\n*Verify:* {{ ($json.verify_first ?? []).join(' · ') || 'n/a' }}\n_No case opened; user added to watchlist for the next 14 days._",
+        "text": "=:eyes: *Insider-risk watchlist* — `{{ $json.user ?? 'unknown' }}` ({{ $json.role ?? 'unknown' }}), risk {{ $json.risk_score ?? 0 }}/100 — LLM assessed plausible-benign ({{ $json.llm_confidence ?? 0 }}%).\n> {{ $json.llm_rationale ?? 'n/a' }}\n*Verify:* {{ ($json.verify_first ?? []).join(' · ') || 'n/a' }}\n_No case opened; user added to watchlist for the next 14 days._",
         "otherOptions": {}
       },
       "id": "d1000010-0010-4d10-9010-000000000010",
       "name": "Slack: Add to Watchlist",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [200, 200],
+      "position": [440, 200],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
       "credentials": {
         "slackApi": { "id": "PLACEHOLDER", "name": "Slack API - PLACEHOLDER" }
       }
@@ -225,19 +262,18 @@
       "name": "Low Risk - Log Only",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
-      "position": [-520, 280]
+      "position": [-280, 280]
     },
     {
       "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ processed: true, anomalies_scored: $('Score Access Anomalies').all().filter(i => i.json.user).length, users: $('Score Access Anomalies').all().filter(i => i.json.user).map(i => ({ user: i.json.user, risk_score: i.json.risk_score })) }) }}",
-        "options": {}
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured audit record (bounded) — production: audit table insert.\nlet ticket = null;\ntry { ticket = $('Jira: Confidential Insider-Risk Case').item.json?.key ?? null; } catch (e) {}\nconst sd = $getWorkflowStaticData('global');\nconst log = sd.audit_log ?? [];\nlog.push({\n  ts: new Date().toISOString(),\n  workflow: '10-insider-threat-detection',\n  detection_id: $json.detection_id ?? null,\n  user: $json.user ?? null,\n  risk_score: $json.risk_score ?? null,\n  outcome: $json.llm_decision ?? 'direct_escalation',\n  ticket,\n  delivery_ok: !$json.error,\n  delivery_error: $json.error ? String($json.error.message ?? $json.error).slice(0, 200) : null,\n});\nif (log.length > 300) log.splice(0, log.length - 300);\nsd.audit_log = log;\nreturn { json: $json };"
       },
-      "id": "d1000010-0012-4d10-9010-000000000012",
-      "name": "Respond to Log Source",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.1,
-      "position": [920, 120]
+      "id": "d1000010-0013-4d10-9010-000000000013",
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 80]
     }
   ],
   "connections": {
@@ -247,6 +283,11 @@
       ]
     },
     "Score Access Anomalies": {
+      "main": [
+        [ { "node": "Respond 202 Accepted", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Respond 202 Accepted": {
       "main": [
         [ { "node": "Risk Band", "type": "main", "index": 0 } ]
       ]
@@ -286,23 +327,21 @@
     },
     "Slack: Escalate to Security Team": {
       "main": [
-        [ { "node": "Respond to Log Source", "type": "main", "index": 0 } ]
+        [ { "node": "Audit Log", "type": "main", "index": 0 } ]
       ]
     },
     "Slack: Add to Watchlist": {
       "main": [
-        [ { "node": "Respond to Log Source", "type": "main", "index": 0 } ]
-      ]
-    },
-    "Low Risk - Log Only": {
-      "main": [
-        [ { "node": "Respond to Log Source", "type": "main", "index": 0 } ]
+        [ { "node": "Audit Log", "type": "main", "index": 0 } ]
       ]
     }
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
   },
   "pinData": {},
   "tags": [

@@ -15,13 +15,14 @@ Design detail worth noticing: every intel HTTP node has `onError: continueRegula
 
 ## Trigger
 
-`POST /webhook/ioc-enrich`
+`POST /webhook/ioc-enrich` (header-auth protected). This endpoint stays **synchronous** by design: it's an on-demand analyst tool, not a machine-to-machine webhook with delivery retries — the caller wants the report in the response. Batches larger than ~15 IOCs on a free VT key will be slow; see rate-limit notes below.
 
 ## Test it
 
 ```bash
 curl -X POST "http://localhost:5678/webhook/ioc-enrich" \
   -H "Content-Type: application/json" \
+  -H "X-Webhook-Token: REPLACE_ME" \
   -d '{
     "batch_id": "ir-case-2026-042",
     "iocs": [
